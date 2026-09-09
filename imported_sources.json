@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "imported_urls": {
+    "https://github.com/localsend/localsend": {
+      "tool_name": "localsend",
+      "display_name": "LocalSend · 局域网互传",
+      "category": "文件传输",
+      "summary": "电脑与手机在局域网内互传文件和文字",
+      "scenario": "跨系统传照片、文档；无外网时交换资料",
+      "platforms": [
+        "Windows",
+        "macOS",
+        "Linux",
+        "Android",
+        "iOS",
+        "Fire OS"
+      ],
+      "mode": "snapshot",
+      "ref": "v1.18.2",
+      "commit": "af0416be50770a97760f7070684bc667b759a15c",
+      "license": "Apache-2.0",
+      "imported_at": "2026-09-09T11:45:19+08:00",
+      "checked_at": "2026-09-09T11:45:19+08:00",
+      "verification": "文档与源码核验；未安装实测、未编译"
+    }
+  }
+}

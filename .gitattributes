@@ -1,0 +1,2 @@
+# Preserve archived upstream file bytes, including their original line endings.
+tools/*/source/** -text
