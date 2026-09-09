@@ -79,6 +79,25 @@
       "imported_at": "2026-09-09T20:49:00+08:00",
       "checked_at": "2026-09-09T20:49:00+08:00",
       "verification": "文档与源码核验；未安装桌面端实测"
+    },
+    "https://github.com/julyx10/lap": {
+      "tool_name": "lap",
+      "display_name": "Lap · 本地私有照片管理器",
+      "category": "媒体处理",
+      "summary": "离线优先的大型本地相册管理与浏览工具，支持智能相册、相似排重与本地 AI 检索",
+      "scenario": "整理单反/手机海量照片、查找重复与相似图片、本地离线按特征搜索",
+      "platforms": [
+        "Windows",
+        "macOS",
+        "Linux"
+      ],
+      "mode": "snapshot",
+      "ref": "v0.3.1",
+      "commit": "d6cad080d2a5e59206ec062b83ef8e92b37ee896",
+      "license": "GPL-3.0",
+      "imported_at": "2026-09-09T20:58:00+08:00",
+      "checked_at": "2026-09-09T20:58:00+08:00",
+      "verification": "文档与源码核验；未安装桌面端实测"
     }
   }
 }

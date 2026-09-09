@@ -572,7 +572,6 @@
   "apps/daemon/test/unit/task-service.test.ts": "1cd96b03056f90931a393c87528b505c5bc3dfd6044b718f0bd8ea449a79dd5c",
   "apps/daemon/test/unit/thread-manager.test.ts": "ba6726fddc57e3892eacbc0b9a18ff8606029d60f70857b7c86b8c8b3ec26927",
   "apps/daemon/test/unit/workspace-files.test.ts": "e4a7503d8e1eaab690f2ad5f56f095fdfb2e74ee9e4e1812e260d4009a49646d",
-  "apps/desktop/.DS_Store": "d65165279105ca6773180500688df4bdc69a2c7b771752f0a46ef120b7fd8ec3",
   "apps/desktop/electron-builder.yml": "7108b7c6d027b18e365b7639c6cdd2f803523a51af5179a7979ce8deab71192b",
   "apps/desktop/package.json": "8b343fefb472619b1d31639fc937e00cb5249dcab646813e6419e8702797dc6e",
   "apps/desktop/playwright.config.ts": "987a6e31938039256863d6026854fa0ce13d7ed4117f53122dff91d6e9688aa8",
