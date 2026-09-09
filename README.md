@@ -75,6 +75,6 @@ python scripts/test_catalog.py
 
 `check` 只读核验；`render` 仅刷新首页索引区域。
 
-用于自动整理收藏的 [github-tools-collect 技能](https://github.com/hailanbb/skill-selection/tree/master/skills/github-tools-collect) 单独维护在 `skill-selection`，不属于本库收藏的软件。浏览、下载和使用本库工具无需安装该技能。
+浏览、下载和使用本库工具无需安装任何 Agent 技能。维护者可以直接使用上述脚本，或使用自行安装的收藏辅助技能。
 
 </details>
