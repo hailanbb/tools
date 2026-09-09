@@ -1,28 +1,8 @@
-# 🧰 工具精选（Tools Selection）
+# 🧰 Tools · 实用工具收藏
 
-个人 GitHub 好工具收藏库。用中文说明解决什么问题、怎么开始使用，并保存可追溯的源码快照，让收藏变成真正用得上的工具箱。
+收藏 GitHub 上值得使用的软件和实用工具，覆盖文件传输、效率办公、媒体处理、系统维护与开发辅助等场景。每个工具都配有中文介绍、官方获取入口和上手指南，按需要保存源码快照。
 
-**[🛠️ 工具索引](#catalog) · [📥 收藏方法](#collect) · [🤖 收藏技能](skills/github-tools-collect/README.md)**
-
-## 📂 仓库结构
-
-```text
-tools/
-├── README.md                       # 中文分类索引
-├── imported_sources.json           # 来源、版本与防重清单（事实主表）
-├── docs/collection-policy.md        # 收录、更新与验证规范
-├── skills/github-tools-collect/    # 可反复使用的收藏技能
-│   ├── SKILL.md                    # Agent 工作流
-│   ├── README.md                   # 安装与使用
-│   ├── agents/openai.yaml          # 技能展示信息
-│   └── scripts/catalog.py          # 索引生成与完整性校验
-└── tools/
-    └── localsend/
-        ├── README.md               # 中文上手指南
-        ├── UPSTREAM.md             # 版本、许可、子模块与验证记录
-        ├── snapshot-manifest.json  # 源文件 SHA-256 清单
-        └── source/                 # 上游源码与原始文档
-```
+**[🛠️ 工具索引](#catalog) · [📂 仓库结构](#structure) · [📥 收录方式](#collect)**
 
 <a id="catalog"></a>
 
@@ -38,35 +18,63 @@ tools/
 
 <!-- catalog:end -->
 
-分类按用途增长：文件传输、效率办公、知识管理、开发辅助、媒体处理、系统维护、AI 工具。工具统一放在 `tools/<slug>/`，分类变化不移动目录；不为尚未收藏的分类创建空文件夹。
+### 如何选择
+
+- **电脑与手机互传文件** → [LocalSend 使用指南](tools/localsend/README.md)：支持多种系统，在本地网络内传照片、文档和文字。
+- 更多类别随实际收藏增加，不设置空目录，也不把安装工具的流程套成 Agent 技能调用。
+
+<a id="structure"></a>
+
+## 📂 仓库结构
+
+```text
+tools/
+├── README.md                     # 工具分类索引
+├── tools/                        # 收藏的软件与实用工具
+│   └── localsend/
+│       ├── README.md             # 中文介绍、安装与使用指南
+│       ├── UPSTREAM.md           # 原项目、版本与许可记录
+│       ├── snapshot-manifest.json # 源文件完整性清单
+│       └── source/               # 上游源码与原始说明
+├── imported_sources.json         # 来源与版本清单，避免重复收藏
+├── docs/collection-policy.md      # 收录与维护约定
+└── scripts/                      # 本仓库的索引维护脚本
+    ├── catalog.py
+    └── test_catalog.py
+```
+
+工具统一放入 `tools/<工具名>/`，首页按用途分类；改变分类不改变工具地址。`scripts/` 仅维护本仓库，不是收藏条目。
 
 <a id="collect"></a>
 
-## 📥 如何继续收藏
+## 📥 收录方式
 
-安装[收藏技能](skills/github-tools-collect/README.md)后，可以直接说：
+提供 GitHub 项目链接即可整理收录。每个条目包含：
 
-> 把这个 GitHub 工具收藏到 hailanbb/tools：仓库链接。
+1. **是什么、适合谁**：中文用途介绍、平台和使用场景。
+2. **怎么获取和使用**：官方安装入口、最短操作步骤、常见问题、更新和卸载说明。
+3. **来自哪里**：原项目地址、核验日期、版本与许可证。
+4. **可选源码快照**：固定提交保存；体积或许可不适合复制时只保留介绍与链接。
 
-也支持“更新 LocalSend 到最新正式版”“只收藏链接和中文指南，不保存源码”“检查工具索引是否一致”。同一来源再次收藏会返回已有条目；只有明确要求更新才替换快照。
+同一来源重复提交不会新增重复条目；明确要求更新时才刷新既有快照。源码备份不包含 Git 历史或安装包，子模块与未实测部分在各条目中说明。
 
-## 📌 收录约定
+## 📌 维护约定
 
-- 中文指南放在工具目录，原始 README、许可证和源码放在 `source/`，不重写原作。
-- 默认优先正式版，记录精确提交；没有正式版时说明采用的分支快照。
-- 源码是时间点备份，不包含 Git 历史、安装包或自动更新承诺。子模块与 LFS 的完整性单独说明。
-- 没有运行过的软件标注“文档核验”，不会把收藏等同于测试通过。
-- 第三方文件沿用各自许可证；本仓库不以一个顶层许可证覆盖所有工具。详见[收录规范](docs/collection-policy.md)。
+第三方源码和原始文档保持原样，保留各自许可证；中文指南独立编写。分类、版本、来源与目录由[来源清单](imported_sources.json)统一记录，详见[收录规范](docs/collection-policy.md)。
 
-## 🔎 维护
+<details>
+<summary>维护者：索引校验与自动化</summary>
 
-需要 Python 3.10+，使用标准库，无额外依赖。在仓库根目录运行：
+Python 3.10+，不需要额外依赖。在仓库根目录运行：
 
 ```shell
-python skills/github-tools-collect/scripts/catalog.py check .
-python skills/github-tools-collect/scripts/catalog.py render .
+python scripts/catalog.py check .
+python scripts/catalog.py render .
+python scripts/test_catalog.py
 ```
 
-`check` 只读检查；`render` 仅更新首页的自动索引区域。新增或更新时同步维护来源主表、工具指南、来源说明与文件摘要。
+`check` 只读核验；`render` 仅刷新首页索引区域。
 
-组织与呈现参考 [skill-selection](https://github.com/hailanbb/skill-selection) 及其[转存至github](https://github.com/hailanbb/skill-selection/tree/master/skills/%E8%BD%AC%E5%AD%98%E8%87%B3github)；在此基础上增加版本固定、原文保留和一致性检查。
+用于自动整理收藏的 [github-tools-collect 技能](https://github.com/hailanbb/skill-selection/tree/master/skills/github-tools-collect) 单独维护在 `skill-selection`，不属于本库收藏的软件。浏览、下载和使用本库工具无需安装该技能。
+
+</details>

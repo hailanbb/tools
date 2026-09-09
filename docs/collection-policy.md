@@ -1,5 +1,7 @@
 # 收录与更新规范
 
+本库收藏独立软件与实用工具，分类按用途组织。AI Agent Skill 的发布与安装资料放在 `hailanbb/skill-selection`，不得在本库重新创建 `skills/` 集合。`scripts/` 只承载索引生成与核验代码。
+
 ## 数据与目录
 
 `imported_sources.json` 是唯一索引主表，`schema_version` 为 1，`imported_urls` 以标准化 GitHub 仓库地址为键。每条记录包含 `tool_name`（稳定 slug）、`display_name`、`category`、`summary`、`scenario`、`platforms`、`mode`、`ref`、`commit`、`license`、`imported_at`、`checked_at`、`verification`。`mode` 为 `snapshot` 或 `guide-only`；更新另加 `updated_at`，保留首次收录时间。
