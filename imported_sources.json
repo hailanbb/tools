@@ -60,6 +60,25 @@
       "imported_at": "2026-09-09T13:07:07+08:00",
       "checked_at": "2026-09-09T13:07:07+08:00",
       "verification": "文档与源码核验；未安装、未实测转换"
+    },
+    "https://github.com/krillinai/opencreator": {
+      "tool_name": "opencreator",
+      "display_name": "OpenCreator · AI 创作工作台",
+      "category": "媒体处理",
+      "summary": "以 Codex 为引擎的本地 AI 工作台，集成视频翻译、下载与图文生成",
+      "scenario": "自媒体与创作者制作双语视频、抓取素材、生成封面与多模态创作",
+      "platforms": [
+        "Windows",
+        "macOS",
+        "Linux"
+      ],
+      "mode": "snapshot",
+      "ref": "v3.1.0",
+      "commit": "d7dcf6084b3413b9a1ef13e94484b2fd3916c6a8",
+      "license": "Apache-2.0 / GPL-3.0",
+      "imported_at": "2026-09-09T20:49:00+08:00",
+      "checked_at": "2026-09-09T20:49:00+08:00",
+      "verification": "文档与源码核验；未安装桌面端实测"
     }
   }
 }
