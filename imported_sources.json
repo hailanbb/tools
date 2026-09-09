@@ -41,6 +41,25 @@
       "imported_at": "2026-09-09T13:02:45+08:00",
       "checked_at": "2026-09-09T13:02:45+08:00",
       "verification": "文档与源码核验；未运行、未安装证书、未配置代理"
+    },
+    "https://github.com/microsoft/markitdown": {
+      "tool_name": "markitdown",
+      "display_name": "MarkItDown · 文档转 Markdown",
+      "category": "文档转换",
+      "summary": "将 PDF、Office、HTML 等内容转换为 Markdown",
+      "scenario": "知识库入库、文档检索与大模型文本预处理",
+      "platforms": [
+        "Windows",
+        "macOS",
+        "Linux"
+      ],
+      "mode": "snapshot",
+      "ref": "v0.1.7",
+      "commit": "fd239d5d2be43d9b68329730206b9312c7d5a388",
+      "license": "MIT",
+      "imported_at": "2026-09-09T13:07:07+08:00",
+      "checked_at": "2026-09-09T13:07:07+08:00",
+      "verification": "文档与源码核验；未安装、未实测转换"
     }
   }
 }
