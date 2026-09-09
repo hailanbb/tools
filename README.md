@@ -10,10 +10,11 @@
 
 <!-- catalog:start -->
 
-已收藏 **1** 个工具。版本为收录时快照，实际使用请查看官方发行页。
+已收藏 **2** 个工具。版本为收录时快照，实际使用请查看官方发行页。
 
 | 分类 | 工具 | 核心功能 | 使用场景 | 平台 | 收藏版本 | 详细说明 |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| 媒体处理 | 微信视频号下载器 | 通过本地代理为视频号页面提供下载入口 | 保存本人或获授权的视频素材 | Windows / macOS / Linux | v260907 | [👉 使用指南](tools/wx-channels-download/README.md) |
 | 文件传输 | LocalSend · 局域网互传 | 电脑与手机在局域网内互传文件和文字 | 跨系统传照片、文档；无外网时交换资料 | Windows / macOS / Linux / Android / iOS / Fire OS | v1.18.2 | [👉 使用指南](tools/localsend/README.md) |
 
 <!-- catalog:end -->
@@ -21,6 +22,7 @@
 ### 如何选择
 
 - **电脑与手机互传文件** → [LocalSend 使用指南](tools/localsend/README.md)：支持多种系统，在本地网络内传照片、文档和文字。
+- **保存视频号素材** → [微信视频号下载器](tools/wx-channels-download/README.md)：通过本地代理提供下载入口，使用前了解证书与代理要求。
 - 更多类别随实际收藏增加，不设置空目录，也不把安装工具的流程套成 Agent 技能调用。
 
 <a id="structure"></a>
@@ -31,11 +33,12 @@
 tools/
 ├── README.md                     # 工具分类索引
 ├── tools/                        # 收藏的软件与实用工具
-│   └── localsend/
-│       ├── README.md             # 中文介绍、安装与使用指南
-│       ├── UPSTREAM.md           # 原项目、版本与许可记录
-│       ├── snapshot-manifest.json # 源文件完整性清单
-│       └── source/               # 上游源码与原始说明
+│   ├── localsend/
+│   │   ├── README.md             # 中文介绍、安装与使用指南
+│   │   ├── UPSTREAM.md           # 原项目、版本与许可记录
+│   │   ├── snapshot-manifest.json # 源文件完整性清单
+│   │   └── source/               # 上游源码与原始说明
+│   └── wx-channels-download/     # 微信视频号下载器，相同条目结构
 ├── imported_sources.json         # 来源与版本清单，避免重复收藏
 ├── docs/collection-policy.md      # 收录与维护约定
 └── scripts/                      # 本仓库的索引维护脚本

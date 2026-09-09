@@ -22,6 +22,25 @@
       "imported_at": "2026-09-09T11:45:19+08:00",
       "checked_at": "2026-09-09T11:45:19+08:00",
       "verification": "文档与源码核验；未安装实测、未编译"
+    },
+    "https://github.com/ltaoo/wx_channels_download": {
+      "tool_name": "wx-channels-download",
+      "display_name": "微信视频号下载器",
+      "category": "媒体处理",
+      "summary": "通过本地代理为视频号页面提供下载入口",
+      "scenario": "保存本人或获授权的视频素材",
+      "platforms": [
+        "Windows",
+        "macOS",
+        "Linux"
+      ],
+      "mode": "snapshot",
+      "ref": "v260907",
+      "commit": "d3a59ed5909a332fdd61b3c49bd49442db9c687f",
+      "license": "MIT + Commons Clause v1.0",
+      "imported_at": "2026-09-09T13:02:45+08:00",
+      "checked_at": "2026-09-09T13:02:45+08:00",
+      "verification": "文档与源码核验；未运行、未安装证书、未配置代理"
     }
   }
 }
