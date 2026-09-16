@@ -138,7 +138,6 @@
   "src-vite/tailwind.config.js": "1cd52a0cb50c2c5e36c0bfc8541762874d8e5977e9823b3be37cd3cecda95ee9",
   "src-vite/tsconfig.json": "8e2040f97c803cb81769199dcdc4d198dbcb86f8f790e226d05d71fbbd09526c",
   "src-vite/vite.config.js": "71223216a23f1451ca7fe7d5e552a35c497bb5de4b9977cffdcc184db4ae360c",
-  "src-vite/.vscode/extensions.json": "4cf1d8bb0c29a06068fc2723d17cdfa4d29292705bc87746dee3954910988980",
   "src-vite/src/App.vue": "b146626e6e9ddabbffbccf146fa3434e0b20eaf508f79cb064a206d2e18b7d0e",
   "src-vite/src/main.js": "e7eeaa502a9bc38fff5a2e9147e850bc4c52830d57c61f7f79ca2d98eb577500",
   "src-vite/src/shims-vue.d.ts": "445b025b559e5db803608a33381ffcacf22b500d21a73cf50bf9a09eecb10d82",

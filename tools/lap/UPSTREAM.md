@@ -8,7 +8,7 @@
 | 固定提交 | [d6cad080d2a5e59206ec062b83ef8e92b37ee896](https://github.com/julyx10/lap/tree/d6cad080d2a5e59206ec062b83ef8e92b37ee896) |
 | 收录及核验时间 | 2026-09-09T20:58:00+08:00 |
 | 许可证 | [GPL-3.0](source/LICENSE) |
-| 源文件 | 403 个 Git 跟踪文件 |
+| 源文件 | 402 个 Git 跟踪文件 |
 
 版本标签 `v0.3.1` 对应提交 SHA `d6cad080d2a5e59206ec062b83ef8e92b37ee896`。源文件原始字节与 Git 提交逐一核对；[SHA-256 清单](snapshot-manifest.json)用于后续完整性核验。
 
