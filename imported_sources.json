@@ -117,6 +117,26 @@
       "imported_at": "2026-09-16T09:23:00+08:00",
       "checked_at": "2026-09-16T09:23:00+08:00",
       "verification": "文档与源码核验；未安装桌面端实测"
+    },
+    "https://github.com/thu-maic/openmaic": {
+      "tool_name": "openmaic",
+      "display_name": "OpenMAIC · 多智能体互动课堂",
+      "category": "教育学习",
+      "summary": "面向沉浸式学习的多智能体互动课堂平台，一键将任意主题或文档转化为交互式课程与仿真实验",
+      "scenario": "课程教学设计、交互式自学体验、多智能体协同授课与实验推演",
+      "platforms": [
+        "Windows",
+        "macOS",
+        "Linux",
+        "Docker"
+      ],
+      "mode": "snapshot",
+      "ref": "v1.0.3",
+      "commit": "e693e11a81644f84c258df73dbda378643520a62",
+      "license": "MIT",
+      "imported_at": "2026-09-17T00:27:00+08:00",
+      "checked_at": "2026-09-17T00:27:00+08:00",
+      "verification": "文档与源码核验；未部署实测、未启动服务"
     }
   }
 }
