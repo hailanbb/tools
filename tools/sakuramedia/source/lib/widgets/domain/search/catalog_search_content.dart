@@ -1,0 +1,237 @@
+import 'package:material_ui/material_ui.dart';
+import 'package:sakuramedia/widgets/base/layout/scrolling/app_fixed_header_layout.dart';
+import 'package:sakuramedia/features/actors/data/dto/actor_list_item_dto.dart';
+import 'package:sakuramedia/features/movies/data/dto/listing/movie_list_item_dto.dart';
+import 'package:sakuramedia/features/search/presentation/providers/catalog_search_state.dart';
+import 'package:sakuramedia/theme.dart';
+import 'package:sakuramedia/widgets/base/actions/app_button.dart';
+import 'package:sakuramedia/widgets/domain/actors/actor_summary_grid.dart';
+import 'package:sakuramedia/widgets/base/feedback/app_empty_state.dart';
+import 'package:sakuramedia/widgets/domain/movies/movie_summary_grid.dart';
+import 'package:sakuramedia/widgets/base/navigation/app_tab_bar.dart';
+import 'package:sakuramedia/widgets/domain/search/catalog_search_field.dart';
+import 'package:sakuramedia/widgets/domain/search/catalog_search_stream_status_card.dart';
+
+class CatalogSearchContent extends StatelessWidget {
+  const CatalogSearchContent({
+    super.key,
+    required this.state,
+    required this.textController,
+    required this.tabController,
+    required this.useOnlineSearch,
+    required this.onOnlineSearchToggle,
+    required this.onSubmitSearch,
+    required this.onTabSelected,
+    required this.onMovieTap,
+    this.onMovieMenuRequest,
+    required this.onActorTap,
+    required this.onMovieSubscriptionTap,
+    required this.onActorSubscriptionTap,
+    this.onFallbackToOnlineSearch,
+  });
+
+  final CatalogSearchState state;
+  final TextEditingController textController;
+  final TabController tabController;
+  final bool useOnlineSearch;
+  final ValueChanged<bool> onOnlineSearchToggle;
+  final VoidCallback onSubmitSearch;
+  final ValueChanged<int> onTabSelected;
+  final ValueChanged<MovieListItemDto> onMovieTap;
+  final void Function(MovieListItemDto movie, Offset globalPosition)?
+  onMovieMenuRequest;
+  final ValueChanged<ActorListItemDto> onActorTap;
+  final ValueChanged<MovieListItemDto> onMovieSubscriptionTap;
+  final ValueChanged<ActorListItemDto> onActorSubscriptionTap;
+  final VoidCallback? onFallbackToOnlineSearch;
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: context.appColors.surfaceElevated,
+      child: AppFixedHeaderLayout(
+        header: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            CatalogSearchField(
+              key: const Key('catalog-search-page-field'),
+              fieldKey: const Key('catalog-search-page-input'),
+              searchButtonKey: const Key('catalog-search-page-submit'),
+              onlineToggleKey: const Key('catalog-search-page-online-toggle'),
+              controller: textController,
+              hintText: '如 SSNI-888、三上悠亚',
+              showOnlineToggle: true,
+              isOnlineSearchEnabled: useOnlineSearch,
+              onOnlineSearchToggle: onOnlineSearchToggle,
+              onSubmitted: (_) => onSubmitSearch(),
+              onSearchTap: onSubmitSearch,
+            ),
+            SizedBox(height: context.appSpacing.xs),
+            AppTabBar(
+              controller: tabController,
+              onTap: onTabSelected,
+              tabs: const [
+                Tab(text: '影片'),
+                Tab(text: '女优'),
+              ],
+            ),
+            SizedBox(height: context.appSpacing.lg),
+          ],
+        ),
+        child: CustomScrollView(
+          slivers: [
+            if (state.streamStatus != null)
+              SliverToBoxAdapter(
+                child: Padding(
+                  padding: EdgeInsets.only(bottom: context.appSpacing.md),
+                  child: CatalogSearchStreamStatusCard(
+                    status: state.streamStatus!,
+                  ),
+                ),
+              ),
+            _buildBodySliver(context),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildBodySliver(BuildContext context) {
+    if (state.query.isEmpty && !state.isLoading) {
+      return const SliverToBoxAdapter(
+        child: AppEmptyState(message: '输入关键词开始搜索'),
+      );
+    }
+
+    if (state.errorMessage != null) {
+      return SliverToBoxAdapter(
+        child: AppEmptyState(
+          message: state.errorMessage!,
+          onRetry: onSubmitSearch,
+          retryKey: const Key('catalog-search-retry'),
+        ),
+      );
+    }
+
+    if (state.isLoading) {
+      return const SliverToBoxAdapter(child: _CatalogSearchLoadingIndicator());
+    }
+
+    switch (state.activeKind) {
+      case CatalogSearchKind.movies:
+        if (!state.isOnlineSearchActive &&
+            state.movieResults.isEmpty &&
+            onFallbackToOnlineSearch != null) {
+          return _buildLocalEmptyFallback('本地库未找到匹配影片');
+        }
+        return MovieSummarySliver(
+          items: state.movieResults,
+          isLoading: false,
+          emptyMessage: state.isOnlineSearchActive
+              ? '在线源未找到该番号或未成功入库'
+              : '本地库中没有匹配该关键词的影片。',
+          onMovieTap: onMovieTap,
+          onMovieMenuRequest: onMovieMenuRequest,
+          onMovieSubscriptionTap: onMovieSubscriptionTap,
+          isMovieSubscriptionUpdating: (movie) =>
+              state.isMovieSubscriptionUpdating(movie.movieNumber),
+        );
+      case CatalogSearchKind.actors:
+        if (!state.isOnlineSearchActive &&
+            state.actorResults.isEmpty &&
+            onFallbackToOnlineSearch != null) {
+          return _buildLocalEmptyFallback('本地库未找到匹配女优');
+        }
+        return ActorSummarySliver(
+          items: state.actorResults,
+          isLoading: false,
+          emptyMessage: state.isOnlineSearchActive
+              ? '在线源未找到匹配女优'
+              : '本地库中没有匹配该关键词的女优。',
+          onActorTap: onActorTap,
+          onActorSubscriptionTap: onActorSubscriptionTap,
+          isActorSubscriptionUpdating: (actor) =>
+              state.isActorSubscriptionUpdating(actor.id),
+        );
+    }
+  }
+
+  Widget _buildLocalEmptyFallback(String message) {
+    return SliverToBoxAdapter(
+      child: _CatalogSearchOnlineFallback(
+        message: message,
+        onPressed: onFallbackToOnlineSearch!,
+      ),
+    );
+  }
+}
+
+class _CatalogSearchLoadingIndicator extends StatelessWidget {
+  const _CatalogSearchLoadingIndicator();
+
+  @override
+  Widget build(BuildContext context) {
+    return const SizedBox(
+      height: 240,
+      child: Center(
+        child: SizedBox(
+          key: Key('catalog-search-loading-indicator'),
+          width: 24,
+          height: 24,
+          child: CircularProgressIndicator.adaptive(strokeWidth: 2.4),
+        ),
+      ),
+    );
+  }
+}
+
+class _CatalogSearchOnlineFallback extends StatelessWidget {
+  const _CatalogSearchOnlineFallback({
+    required this.message,
+    required this.onPressed,
+  });
+
+  final String message;
+  final VoidCallback onPressed;
+
+  @override
+  Widget build(BuildContext context) {
+    final spacing = context.appSpacing;
+    return Padding(
+      padding: EdgeInsets.symmetric(
+        horizontal: spacing.lg,
+        vertical: spacing.xxl,
+      ),
+      child: Center(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(
+              Icons.travel_explore,
+              size: context.appComponentTokens.iconSize4xl,
+              color: resolveAppTextToneColor(context, AppTextTone.secondary),
+            ),
+            SizedBox(height: spacing.md),
+            Text(
+              message,
+              textAlign: TextAlign.center,
+              style: resolveAppTextStyle(
+                context,
+                size: AppTextSize.s14,
+                weight: AppTextWeight.regular,
+                tone: AppTextTone.secondary,
+              ),
+            ),
+            SizedBox(height: spacing.lg),
+            AppButton(
+              key: const Key('catalog-search-online-fallback'),
+              variant: AppButtonVariant.primary,
+              label: '从外部数据源获取',
+              onPressed: onPressed,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}

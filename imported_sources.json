@@ -137,6 +137,27 @@
       "imported_at": "2026-09-17T00:27:00+08:00",
       "checked_at": "2026-09-17T00:27:00+08:00",
       "verification": "文档与源码核验；未部署实测、未启动服务"
+    },
+    "https://github.com/tinypinglite/sakuramedia": {
+      "tool_name": "sakuramedia",
+      "display_name": "SakuraMedia · 面向 NAS 的私人媒体库管理平台",
+      "category": "媒体处理",
+      "summary": "面向 NAS 用户的多端影视媒体库管理与观影系统，支持自动入库、采样指纹排重、缩略图时间轴与插件扩展",
+      "scenario": "NAS 私有媒体库管理、多端观影（内置播放器与缩略图时间轴）、重复媒体排重与网盘挂载",
+      "platforms": [
+        "Windows",
+        "macOS",
+        "Android",
+        "iOS",
+        "Docker"
+      ],
+      "mode": "snapshot",
+      "ref": "v0.8.2",
+      "commit": "5502b3ede34866d054cc784e532a1c6fac1c2b51",
+      "license": "GPL-3.0",
+      "imported_at": "2026-09-23T21:35:00+08:00",
+      "checked_at": "2026-09-23T21:35:00+08:00",
+      "verification": "文档与源码核验；未部署后端实测、未连接网盘"
     }
   }
 }

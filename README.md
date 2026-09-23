@@ -10,13 +10,14 @@
 
 <!-- catalog:start -->
 
-已收藏 **7** 个工具。版本为收录时快照，实际使用请查看官方发行页。
+已收藏 **8** 个工具。版本为收录时快照，实际使用请查看官方发行页。
 
 | 分类 | 工具 | 核心功能 | 使用场景 | 平台 | 收藏版本 | 详细说明 |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
 | 媒体处理 | Lap · 本地私有照片管理器 | 离线优先的大型本地相册管理与浏览工具，支持智能相册、相似排重与本地 AI 检索 | 整理单反/手机海量照片、查找重复与相似图片、本地离线按特征搜索 | Windows / macOS / Linux | v0.3.1 | [👉 使用指南](tools/lap/README.md) |
 | 媒体处理 | OmniGet · 全能课程与媒体下载工具箱 | 免终端的桌面全能媒体与课程下载器，集成课程播放器、电子书阅读与媒体库 | 批量下载 Udemy/Hotmart 课程、下载 1800+ 网站音视频、转写与离线阅读学习 | Windows / macOS / Linux | v0.9.2 | [👉 使用指南](tools/omniget/README.md) |
 | 媒体处理 | OpenCreator · AI 创作工作台 | 以 Codex 为引擎的本地 AI 工作台，集成视频翻译、下载与图文生成 | 自媒体与创作者制作双语视频、抓取素材、生成封面与多模态创作 | Windows / macOS / Linux | v3.1.0 | [👉 使用指南](tools/opencreator/README.md) |
+| 媒体处理 | SakuraMedia · 面向 NAS 的私人媒体库管理平台 | 面向 NAS 用户的多端影视媒体库管理与观影系统，支持自动入库、采样指纹排重、缩略图时间轴与插件扩展 | NAS 私有媒体库管理、多端观影（内置播放器与缩略图时间轴）、重复媒体排重与网盘挂载 | Windows / macOS / Android / iOS / Docker | v0.8.2 | [👉 使用指南](tools/sakuramedia/README.md) |
 | 媒体处理 | 微信视频号下载器 | 通过本地代理为视频号页面提供下载入口 | 保存本人或获授权的视频素材 | Windows / macOS / Linux | v260907 | [👉 使用指南](tools/wx-channels-download/README.md) |
 | 教育学习 | OpenMAIC · 多智能体互动课堂 | 面向沉浸式学习的多智能体互动课堂平台，一键将任意主题或文档转化为交互式课程与仿真实验 | 课程教学设计、交互式自学体验、多智能体协同授课与实验推演 | Windows / macOS / Linux / Docker | v1.0.3 | [👉 使用指南](tools/openmaic/README.md) |
 | 文件传输 | LocalSend · 局域网互传 | 电脑与手机在局域网内互传文件和文字 | 跨系统传照片、文档；无外网时交换资料 | Windows / macOS / Linux / Android / iOS / Fire OS | v1.18.2 | [👉 使用指南](tools/localsend/README.md) |
@@ -33,6 +34,7 @@
 - **海量本地照片浏览与整理** → [Lap 使用指南](tools/lap/README.md)：基于 Tauri 的离线优先照片管理器，支持文件夹直读、实况照片、相似排重与本地 AI 搜图。
 - **全能媒体与课程下载** → [OmniGet 使用指南](tools/omniget/README.md)：免终端的跨平台桌面下载器，支持 Udemy/Hotmart 课程、1800+ 站点音视频与内置学习库。
 - **AI 多智能体互动教学** → [OpenMAIC 使用指南](tools/openmaic/README.md)：清华开源的一键多智能体互动课堂，支持文档转课程、AI 协同授课与 3D 实验探究。
+- **NAS 私人媒体库与多端观影** → [SakuraMedia 使用指南](tools/sakuramedia/README.md)：面向 NAS 用户的一站式影视媒体库，支持自动入库、指纹排重、缩略图时间轴与网盘挂载。
 - 更多类别随实际收藏增加，不设置空目录，也不把安装工具的流程套成 Agent 技能调用。
 
 <a id="structure"></a>
@@ -53,7 +55,8 @@ tools/
 │   ├── opencreator/              # AI 创作工作台，相同条目结构
 │   ├── lap/                      # 本地私有照片管理器，相同条目结构
 │   ├── omniget/                  # 全能课程与媒体下载工具箱，相同条目结构
-│   └── openmaic/                 # 多智能体互动课堂，相同条目结构
+│   ├── openmaic/                 # 多智能体互动课堂，相同条目结构
+│   └── sakuramedia/              # 私人媒体库管理平台，相同条目结构
 ├── imported_sources.json         # 来源与版本清单，避免重复收藏
 ├── docs/collection-policy.md      # 收录与维护约定
 └── scripts/                      # 本仓库的索引维护脚本

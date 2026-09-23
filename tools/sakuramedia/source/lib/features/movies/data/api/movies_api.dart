@@ -1,0 +1,435 @@
+import 'package:sakuramedia/core/network/api_client.dart';
+import 'package:sakuramedia/core/network/api_sse_event.dart';
+import 'package:sakuramedia/core/network/paginated_response_dto.dart';
+import 'package:sakuramedia/features/activity/data/job_metadata_dto.dart';
+import 'package:sakuramedia/features/movies/data/dto/detail/movie_detail_dto.dart';
+import 'package:sakuramedia/features/movies/data/dto/listing/movie_list_item_dto.dart';
+import 'package:sakuramedia/features/movies/data/dto/detail/movie_review_dto.dart';
+import 'package:sakuramedia/features/movies/data/dto/series_import/movie_search_stream_update.dart';
+import 'package:sakuramedia/features/movies/data/dto/player/movie_subtitle_dto.dart';
+import 'package:sakuramedia/features/movies/data/dto/detail/movie_collection_type_dto.dart';
+import 'package:sakuramedia/features/movies/data/dto/listing/movie_subscription_batch_dto.dart';
+import 'package:sakuramedia/features/movies/data/dto/listing/parsed_movie_number_dto.dart';
+import 'package:sakuramedia/features/search/data/catalog_search_stream_stats.dart';
+import 'package:sakuramedia/features/movies/presentation/controllers/listing/movie_filter_state.dart';
+
+class MoviesApi {
+  const MoviesApi({required ApiClient apiClient}) : _apiClient = apiClient;
+
+  final ApiClient _apiClient;
+
+  Future<PaginatedResponseDto<MovieListItemDto>> getMovies({
+    MovieStatusFilter? status,
+    MovieCollectionTypeFilter? collectionType,
+    MovieNumberSourceFilter? numberSource,
+    String? sort,
+    int? actorId,
+    int? year,
+    List<int>? tagIds,
+    TagMatchMode? tagMatch,
+    int? heatMin,
+    int? heatMax,
+    String? resolution,
+    bool? blacklisted,
+    String? query,
+    int page = 1,
+    int pageSize = 20,
+  }) async {
+    final queryParameters = <String, dynamic>{
+      'page': page,
+      'page_size': pageSize,
+    };
+    if (query != null && query.isNotEmpty) {
+      queryParameters['query'] = query;
+    }
+    if (status != null) {
+      queryParameters['status'] = status.apiValue;
+    }
+    if (collectionType != null) {
+      queryParameters['collection_type'] = collectionType.apiValue;
+    }
+    if (numberSource != null) {
+      queryParameters['number_source'] = numberSource.apiValue;
+    }
+    if (sort != null && sort.isNotEmpty) {
+      queryParameters['sort'] = sort;
+    }
+    if (actorId != null) {
+      queryParameters['actor_id'] = actorId;
+    }
+    if (year != null) {
+      queryParameters['year'] = year;
+    }
+    if (heatMin != null) {
+      queryParameters['heat_min'] = heatMin;
+    }
+    if (resolution != null) {
+      queryParameters['resolution'] = resolution;
+    }
+    if (heatMax != null) {
+      queryParameters['heat_max'] = heatMax;
+    }
+    if (blacklisted != null) {
+      queryParameters['blacklisted'] = blacklisted;
+    }
+    if (tagIds != null && tagIds.isNotEmpty) {
+      queryParameters['tag_ids'] = tagIds.join(',');
+      // tag_match 仅在传 tag_ids 时生效：or 命中任一标签，and 须同时命中全部。
+      if (tagMatch != null) {
+        queryParameters['tag_match'] = tagMatch.apiValue;
+      }
+    }
+
+    final response = await _apiClient.get(
+      '/movies',
+      queryParameters: queryParameters,
+    );
+    return PaginatedResponseDto<MovieListItemDto>.fromJson(
+      response,
+      MovieListItemDto.fromJson,
+    );
+  }
+
+  Future<PaginatedResponseDto<MovieListItemDto>> getLatestMovies({
+    int page = 1,
+    int pageSize = 20,
+  }) async {
+    final response = await _apiClient.get(
+      '/movies/latest',
+      queryParameters: <String, dynamic>{'page': page, 'page_size': pageSize},
+    );
+    return PaginatedResponseDto<MovieListItemDto>.fromJson(
+      response,
+      MovieListItemDto.fromJson,
+    );
+  }
+
+  Future<PaginatedResponseDto<MovieListItemDto>>
+  getSubscribedActorsLatestMovies({int page = 1, int pageSize = 20}) async {
+    final response = await _apiClient.get(
+      '/movies/subscribed-actors/latest',
+      queryParameters: <String, dynamic>{'page': page, 'page_size': pageSize},
+    );
+    return PaginatedResponseDto<MovieListItemDto>.fromJson(
+      response,
+      MovieListItemDto.fromJson,
+    );
+  }
+
+  Future<PaginatedResponseDto<MovieListItemDto>> getMoviesBySeries({
+    required int seriesId,
+    int page = 1,
+    int pageSize = 24,
+  }) async {
+    final response = await _apiClient.post(
+      '/movies/by-series',
+      data: <String, dynamic>{
+        'series_id': seriesId,
+        'page': page,
+        'page_size': pageSize,
+      },
+    );
+    return PaginatedResponseDto<MovieListItemDto>.fromJson(
+      response,
+      MovieListItemDto.fromJson,
+    );
+  }
+
+  Future<MovieDetailDto> getMovieDetail({required String movieNumber}) async {
+    final response = await _apiClient.get('/movies/$movieNumber');
+    return MovieDetailDto.fromJson(response);
+  }
+
+  Future<MovieMergedPlaybackDto> getMergedPlayback({
+    required String movieNumber,
+    required int libraryId,
+  }) async {
+    final response = await _apiClient.get(
+      '/movies/$movieNumber/merged-playback',
+      queryParameters: <String, dynamic>{'library_id': libraryId},
+    );
+    return MovieMergedPlaybackDto.fromJson(response);
+  }
+
+  Future<MovieDetailDto> refreshMovieMetadata({
+    required String movieNumber,
+  }) async {
+    final response = await _apiClient.post(
+      '/movies/$movieNumber/metadata-refresh',
+    );
+    return MovieDetailDto.fromJson(response);
+  }
+
+  Future<ManualJobTriggerResponseDto> recomputeMovieHeat({
+    required String movieNumber,
+  }) async {
+    final response = await _apiClient.post(
+      '/movies/$movieNumber/heat-recompute',
+    );
+    return ManualJobTriggerResponseDto.fromJson(response);
+  }
+
+  Future<List<MovieListItemDto>> getSimilarMovies({
+    required String movieNumber,
+    int limit = 15,
+  }) async {
+    final response = await _apiClient.getList(
+      '/movies/$movieNumber/similar',
+      queryParameters: <String, dynamic>{'limit': limit},
+    );
+    return response.map(MovieListItemDto.fromJson).toList(growable: false);
+  }
+
+  Future<List<MovieReviewDto>> getMovieReviews({
+    required String movieNumber,
+    int page = 1,
+    int pageSize = 20,
+    MovieReviewSort sort = MovieReviewSort.recently,
+  }) async {
+    final response = await _apiClient.getList(
+      '/movies/$movieNumber/reviews',
+      queryParameters: <String, dynamic>{
+        'page': page,
+        'page_size': pageSize,
+        'sort': sort.apiValue,
+      },
+    );
+    return response.map(MovieReviewDto.fromJson).toList(growable: false);
+  }
+
+  Future<MovieSubtitleListDto> getMovieSubtitles({
+    required String movieNumber,
+  }) async {
+    final response = await _apiClient.get('/movies/$movieNumber/subtitles');
+    return MovieSubtitleListDto.fromJson(response);
+  }
+
+  Future<ParsedMovieNumberDto> parseMovieNumber({required String query}) async {
+    final response = await _apiClient.post(
+      '/movies/search/parse-number',
+      data: <String, dynamic>{'query': query.trim()},
+    );
+    return ParsedMovieNumberDto.fromJson(response);
+  }
+
+  Future<MovieCollectionStatusDto> getMovieCollectionStatus({
+    required String movieNumber,
+  }) async {
+    final response = await _apiClient.get(
+      '/movies/$movieNumber/collection-status',
+    );
+    return MovieCollectionStatusDto.fromJson(response);
+  }
+
+  Future<UpdateMovieCollectionTypeResultDto> updateMovieCollectionType({
+    required List<String> movieNumbers,
+    required MovieCollectionType collectionType,
+  }) async {
+    final response = await _apiClient.patch(
+      '/movies/collection-type',
+      data: UpdateMovieCollectionTypePayload(
+        movieNumbers: movieNumbers,
+        collectionType: collectionType,
+      ).toJson(),
+    );
+    return UpdateMovieCollectionTypeResultDto.fromJson(response);
+  }
+
+  Stream<MovieSearchStreamUpdate> searchOnlineMoviesStream({
+    required String movieNumber,
+  }) {
+    return _apiClient
+        .postSse(
+          '/movies/search/javdb/stream',
+          data: <String, dynamic>{'movie_number': movieNumber},
+        )
+        .map(_mapMovieSearchStreamEvent);
+  }
+
+  Future<void> subscribeMovie({required String movieNumber}) {
+    return _apiClient.putNoContent('/movies/$movieNumber/subscription');
+  }
+
+  Future<void> unsubscribeMovie({
+    required String movieNumber,
+    bool deleteMedia = false,
+  }) {
+    return _apiClient.deleteNoContent(
+      '/movies/$movieNumber/subscription',
+      queryParameters: <String, dynamic>{'delete_media': deleteMedia},
+    );
+  }
+
+  Future<void> setMoviesBlacklisted({
+    required List<String> movieNumbers,
+    required bool isBlacklisted,
+  }) {
+    const path = '/movies/blacklist';
+    final data = <String, dynamic>{'movie_numbers': movieNumbers};
+    return isBlacklisted
+        ? _apiClient.putNoContent(path, data: data)
+        : _apiClient.deleteNoContent(path, data: data);
+  }
+
+  Future<MovieSubscriptionBatchResultDto> batchSubscribeMovies({
+    required List<String> movieNumbers,
+  }) async {
+    final response = await _apiClient.post(
+      '/movies/subscriptions',
+      data: <String, dynamic>{'movie_numbers': movieNumbers},
+    );
+    return MovieSubscriptionBatchResultDto.fromJson(response);
+  }
+
+  Future<MovieSubscriptionBatchResultDto> batchUnsubscribeMovies({
+    required List<String> movieNumbers,
+  }) async {
+    final response = await _apiClient.post(
+      '/movies/unsubscriptions',
+      data: <String, dynamic>{'movie_numbers': movieNumbers},
+    );
+    return MovieSubscriptionBatchResultDto.fromJson(response);
+  }
+
+  Stream<MovieSearchStreamUpdate> importSeriesMoviesStream({
+    required int seriesId,
+  }) {
+    return _apiClient
+        .postSse(
+          '/movies/series/$seriesId/javdb/import/stream',
+          data: <String, dynamic>{},
+        )
+        .map(_mapSeriesImportStreamEvent);
+  }
+
+  MovieSearchStreamUpdate _mapSeriesImportStreamEvent(ApiSseEvent event) {
+    final payload = event.jsonData;
+
+    switch (event.event) {
+      case 'search_started':
+        return const MovieSearchStreamUpdate(
+          stage: 'searching',
+          message: '正在搜索系列...',
+        );
+      case 'series_found':
+        return MovieSearchStreamUpdate(
+          stage: 'series_matched',
+          message: '已找到库内系列：${payload['series_name'] ?? ''}',
+        );
+      case 'javdb_series_found':
+        final count = payload['videos_count'];
+        final countLabel = count != null ? '，共 $count 部' : '';
+        return MovieSearchStreamUpdate(
+          stage: 'series_matched',
+          message: '已匹配到 JAVDB 系列$countLabel',
+          total: count as int?,
+        );
+      case 'movie_found':
+        final total = payload['total'] as int?;
+        return MovieSearchStreamUpdate(
+          stage: 'movies_found',
+          message: '已获取到 ${total ?? 0} 部影片，准备入库',
+          total: total,
+        );
+      case 'upsert_started':
+        return MovieSearchStreamUpdate(
+          stage: 'importing',
+          message: '正在入库影片...',
+          current: 0,
+          total: payload['total'] as int?,
+        );
+      case 'movie_skipped' || 'movie_upsert_started' || 'movie_upsert_finished':
+        return MovieSearchStreamUpdate(
+          stage: 'importing',
+          message: '正在入库影片...',
+          current: payload['index'] as int?,
+          total: payload['total'] as int?,
+        );
+      case 'upsert_finished':
+        return MovieSearchStreamUpdate(
+          stage: 'import_finished',
+          message: '入库完成',
+          stats: CatalogSearchStreamStats.fromLooseJson(payload),
+        );
+      case 'completed':
+        return MovieSearchStreamUpdate(
+          stage: 'completed',
+          message: payload['success'] as bool? ?? false ? '导入成功' : '导入失败',
+          results: _parseMovieResults(payload['movies']),
+          stats: CatalogSearchStreamStats.fromLooseJson(payload),
+          success: payload['success'] as bool?,
+          reason: payload['reason'] as String?,
+        );
+      default:
+        return MovieSearchStreamUpdate(stage: event.event, message: '正在处理...');
+    }
+  }
+
+  MovieSearchStreamUpdate _mapMovieSearchStreamEvent(ApiSseEvent event) {
+    final payload = event.jsonData;
+
+    switch (event.event) {
+      case 'search_started':
+        return const MovieSearchStreamUpdate(
+          stage: 'search_started',
+          message: '正在从外部数据源搜索影片',
+        );
+      case 'movie_found':
+        return MovieSearchStreamUpdate(
+          stage: 'movie_found',
+          message: '已从在线源获取候选影片',
+          total: payload['total'] as int?,
+        );
+      case 'upsert_started':
+        return MovieSearchStreamUpdate(
+          stage: 'upsert_started',
+          message: '正在入库在线影片',
+          total: payload['total'] as int?,
+        );
+      case 'upsert_finished':
+        return MovieSearchStreamUpdate(
+          stage: 'upsert_finished',
+          message: '在线影片入库完成',
+          stats: CatalogSearchStreamStats.fromLooseJson(payload),
+        );
+      case 'completed':
+        return MovieSearchStreamUpdate(
+          stage: 'completed',
+          message: '在线搜索已完成',
+          results: _parseMovieResults(payload['movies']),
+          success: payload['success'] as bool? ?? false,
+          reason: payload['reason'] as String?,
+          stats: payload.containsKey('stats') || payload.containsKey('total')
+              ? CatalogSearchStreamStats.fromLooseJson(payload)
+              : null,
+        );
+      default:
+        return MovieSearchStreamUpdate(
+          stage: event.event,
+          message: '正在同步在线影片搜索结果',
+        );
+    }
+  }
+
+  List<MovieListItemDto> _parseMovieResults(dynamic value) {
+    if (value is! List) {
+      return const <MovieListItemDto>[];
+    }
+    return value
+        .whereType<Object?>()
+        .map((item) => MovieListItemDto.fromJson(_toMap(item)))
+        .toList(growable: false);
+  }
+
+  Map<String, dynamic> _toMap(Object? value) {
+    if (value is Map<String, dynamic>) {
+      return value;
+    }
+    if (value is Map) {
+      return value.map(
+        (dynamic key, dynamic data) => MapEntry(key.toString(), data),
+      );
+    }
+    return const <String, dynamic>{};
+  }
+}

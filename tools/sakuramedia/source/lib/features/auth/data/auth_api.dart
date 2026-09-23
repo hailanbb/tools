@@ -1,0 +1,47 @@
+import 'package:sakuramedia/core/network/api_client.dart';
+import 'package:sakuramedia/core/session/credential_store.dart';
+import 'package:sakuramedia/core/session/session_store.dart';
+import 'package:sakuramedia/features/auth/data/auth_tokens_dto.dart';
+
+class AuthApi {
+  const AuthApi({
+    required ApiClient apiClient,
+    required SessionStore sessionStore,
+    required CredentialStore credentialStore,
+  }) : _apiClient = apiClient,
+       _sessionStore = sessionStore,
+       _credentialStore = credentialStore;
+
+  final ApiClient _apiClient;
+  final SessionStore _sessionStore;
+  final CredentialStore _credentialStore;
+
+  Future<AuthTokensDto> createToken({
+    required String username,
+    required String password,
+  }) async {
+    final response = await _apiClient.post(
+      '/auth/tokens',
+      requiresAuth: false,
+      data: <String, dynamic>{'username': username, 'password': password},
+    );
+    final dto = AuthTokensDto.fromJson(response);
+    await _sessionStore.saveTokens(
+      accessToken: dto.accessToken,
+      refreshToken: dto.refreshToken,
+      expiresAt: dto.expiresAt,
+    );
+    await _credentialStore.saveCredentials(
+      username: username,
+      password: password,
+    );
+    return dto;
+  }
+
+  Future<AuthTokensDto> login({
+    required String username,
+    required String password,
+  }) {
+    return createToken(username: username, password: password);
+  }
+}

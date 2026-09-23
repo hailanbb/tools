@@ -1,0 +1,151 @@
+import 'package:material_ui/material_ui.dart';
+import 'package:sakuramedia/features/clip_collections/presentation/pages/shared/clip_collection_detail_content.dart';
+import 'package:sakuramedia/features/clip_collections/presentation/widgets/add_clips_to_collection_dialog.dart';
+import 'package:sakuramedia/features/clip_collections/presentation/widgets/create_clip_collection_dialog.dart';
+import 'package:sakuramedia/routes/app_navigation_actions.dart';
+import 'package:sakuramedia/theme.dart';
+import 'package:sakuramedia/widgets/base/actions/app_button.dart';
+import 'package:sakuramedia/widgets/base/feedback/app_confirm_dialog.dart';
+import 'package:sakuramedia/widgets/base/feedback/app_cover_card_skeleton.dart';
+import 'package:sakuramedia/widgets/base/feedback/app_mobile_skeleton.dart';
+import 'package:sakuramedia/widgets/domain/clips/clip_player_dialog.dart';
+
+export 'package:sakuramedia/features/clip_collections/presentation/pages/shared/clip_collection_detail_content.dart'
+    show ClipCollectionDetailLayout;
+
+/// 桌面切片合集详情壳：桌面语义（网格默认 / 拖序 + hover / 顶栏内联批量 /
+/// 桌面对话框 / 直接播放切片）收在壳里，实现在 [ClipCollectionDetailContent]。
+class DesktopClipCollectionDetailPage extends StatelessWidget {
+  const DesktopClipCollectionDetailPage({
+    super.key,
+    required this.collectionId,
+  });
+
+  final int collectionId;
+
+  @override
+  Widget build(BuildContext context) {
+    return ClipCollectionDetailContent(
+      collectionId: collectionId,
+      surfaceColor: context.appColors.surfaceElevated,
+      keyPrefix: 'clip-collection',
+      useMobileSelectionLayout: false,
+      hoistTitleToSubpageShell: false,
+      enableReorder: true,
+      defaultLayout: ClipCollectionDetailLayout.grid,
+      loadingBuilder: (_) => const _DesktopClipCollectionDetailLoadingState(),
+      playAllBuilder: (context, {required enabled, required onPlayFrom}) {
+        return AppButton(
+          key: const Key('clip-collection-play-all-button'),
+          label: '播放全部',
+          variant: AppButtonVariant.primary,
+          onPressed: enabled ? onPlayFrom : null,
+        );
+      },
+      onMemberTap: (context, clip, actions) {
+        actions.playSingle(context, clip);
+      },
+      playSingle: (context, clip) async {
+        showClipPlayerDialog(
+          context,
+          streamUrl: clip.streamUrl,
+          title: clip.title,
+        );
+      },
+      onOpenMovie: (context, clip) {
+        final movieNumber = clip.movieNumber;
+        if (movieNumber == null || movieNumber.isEmpty) {
+          return;
+        }
+        context.pushDesktopMovieDetail(movieNumber: movieNumber);
+      },
+      confirm: (
+        context, {
+        required title,
+        required message,
+        required confirmLabel,
+        required confirmKey,
+        drawerKey,
+        onConfirm,
+      }) =>
+          showAppConfirmDialog(
+            context,
+            title: title,
+            message: message,
+            danger: true,
+            confirmLabel: confirmLabel,
+            confirmKey: confirmKey,
+            onConfirm: onConfirm,
+            failureFallback: '删除失败，请重试',
+          ),
+      onEditCollection: (context, collection) async {
+        return showEditClipCollectionDialog(context, collection: collection);
+      },
+      onAddClips: (context, memberClipIds) async {
+        await showAddClipsToCollectionDialog(
+          context,
+          collectionId: collectionId,
+          memberClipIds: memberClipIds,
+        );
+      },
+    );
+  }
+}
+
+class _DesktopClipCollectionDetailLoadingState extends StatelessWidget {
+  const _DesktopClipCollectionDetailLoadingState();
+
+  @override
+  Widget build(BuildContext context) {
+    final spacing = context.appSpacing;
+    return Column(
+      key: const Key('clip-collection-detail-loading'),
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            const AppSkeletonBlock(width: 196, height: 24),
+            const Spacer(),
+            AppSkeletonBlock(
+              width: 84,
+              height: context.appComponentTokens.buttonHeightSm,
+              radius: context.appRadius.pillBorder,
+            ),
+          ],
+        ),
+        SizedBox(height: spacing.md),
+        Row(
+          children: [
+            AppSkeletonBlock(
+              width: 96,
+              height: context.appComponentTokens.buttonHeightXs,
+              radius: context.appRadius.pillBorder,
+            ),
+            SizedBox(width: spacing.sm),
+            const AppSkeletonBlock(width: 68, height: 14),
+            const Spacer(),
+            AppSkeletonBlock(
+              width: context.appComponentTokens.buttonHeightSm,
+              height: context.appComponentTokens.buttonHeightSm,
+              radius: context.appRadius.mdBorder,
+            ),
+          ],
+        ),
+        SizedBox(height: spacing.md),
+        Expanded(
+          child: GridView.builder(
+            key: const Key('clip-collection-detail-skeleton-grid'),
+            gridDelegate: SliverGridDelegateWithMaxCrossAxisExtent(
+              maxCrossAxisExtent: 280,
+              mainAxisSpacing: spacing.md,
+              crossAxisSpacing: spacing.md,
+              childAspectRatio: 16 / 9,
+            ),
+            itemCount: 8,
+            itemBuilder: (_, _) => const AppCoverCardSkeleton(),
+          ),
+        ),
+      ],
+    );
+  }
+}

@@ -1,0 +1,86 @@
+# Agent 本地指令,不入库
+AGENTS.md
+
+# Miscellaneous
+*.class
+*.log
+*.pyc
+*.swp
+.DS_Store
+.atom/
+.build/
+.buildlog/
+.history
+.svn/
+.swiftpm/
+migrate_working_dir/
+
+# IntelliJ related
+*.iml
+*.ipr
+*.iws
+.idea/
+
+# The .vscode folder contains launch configuration and tasks you configure in
+# VS Code which you may wish to be included in version control, so this line
+# is commented out by default.
+#.vscode/
+
+# Flutter/Dart/Pub related
+**/doc/api/
+**/ios/Flutter/.last_build_id
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+.pub-cache/
+.pub/
+/build/
+devtools_options.yaml
+
+# Symbolication related
+app.*.symbols
+
+# Obfuscation related
+app.*.map.json
+
+# Android Studio will place build artifacts here
+/android/app/debug
+/android/app/profile
+/android/app/release
+android/key.properties
+android/keystore/
+
+# Wiki (VitePress)
+wiki/node_modules/
+wiki/.vitepress/dist/
+wiki/.vitepress/cache/
+wiki/public/star-history-*.svg
+
+# Python helper scripts
+__pycache__/
+
+# 本地资源和临时图片不纳入版本库。
+assets/*
+
+.vscode
+.worktrees/
+
+.claude
+.mcp.json
+
+# Serena MCP(符号级代码导航)本地缓存/配置/日志,不进版本库
+.serena/
+
+.codex
+.agents
+
+# 本地环境变量(图片模糊等运行时开关),通过 `--dart-define-from-file=.env` 注入
+.env
+.env.local
+
+docs/refactor
+
+# 全量测试的 bundle 入口,由 scripts/test.sh 每次跑测前重新生成(见 tool/gen_test_bundles.dart)
+/test_bundles/
+
+Podfile.lock

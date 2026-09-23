@@ -1,0 +1,391 @@
+import 'dart:ui';
+
+import 'package:material_ui/material_ui.dart';
+import 'package:sakuramedia/theme.dart';
+import 'package:sakuramedia/widgets/base/media/images/masked_image.dart';
+import 'package:sakuramedia/widgets/domain/movies/subscription_heart_badge.dart';
+
+class MovieDetailHeroCard extends StatelessWidget {
+  const MovieDetailHeroCard({
+    super.key,
+    required this.height,
+    required this.mainImageKey,
+    required this.mainImageUrl,
+    required this.heat,
+    required this.canPlay,
+    required this.isSubscribed,
+    required this.isCollection,
+    required this.onPlayTap,
+    this.watchLabel,
+    this.watchTooltip,
+    this.onSubscriptionTap,
+    this.onMoreActionsTap,
+    this.isSubscriptionUpdating = false,
+    this.isMoreActionsUpdating = false,
+    this.isPlayLoading = false,
+  });
+
+  final String? watchLabel;
+  final String? watchTooltip;
+  final double height;
+  final String mainImageKey;
+  final String? mainImageUrl;
+  final int heat;
+  final bool canPlay;
+  final bool isSubscribed;
+  final bool isCollection;
+  final VoidCallback? onPlayTap;
+  final VoidCallback? onSubscriptionTap;
+  final Future<void> Function(Offset globalPosition)? onMoreActionsTap;
+  final bool isSubscriptionUpdating;
+  final bool isMoreActionsUpdating;
+
+  /// 播放动作进行中（如合并播放探测/拉起外部播放器），按钮显示 loading 并禁用。
+  final bool isPlayLoading;
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = context.appColors;
+    final spacing = context.appSpacing;
+    final tokens = context.appComponentTokens;
+
+    return Container(
+      height: height,
+      clipBehavior: Clip.antiAlias,
+      decoration: BoxDecoration(
+        gradient: LinearGradient(
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+          colors: [
+            colors.movieDetailHeroBackgroundStart,
+            colors.movieDetailHeroBackgroundEnd,
+          ],
+        ),
+        borderRadius: context.appRadius.lgBorder,
+      ),
+      child: Stack(
+        children: [
+          if (mainImageUrl != null && mainImageUrl!.isNotEmpty)
+            Positioned.fill(
+              child: Stack(
+                fit: StackFit.expand,
+                children: [
+                  ImageFiltered(
+                    imageFilter: ImageFilter.blur(
+                      sigmaX: _HeroImageFrame.backgroundBlurSigma,
+                      sigmaY: _HeroImageFrame.backgroundBlurSigma,
+                    ),
+                    // 模糊会在边缘留下透明回透（露出底下黑底），放大一圈推出可视区。
+                    child: Transform.scale(
+                      scale: 1.1,
+                      child: MaskedImage(
+                        url: mainImageUrl!,
+                        fit: BoxFit.cover,
+                      ),
+                    ),
+                  ),
+                  ColoredBox(
+                    color: Colors.black.withValues(
+                      alpha: _HeroImageFrame.backgroundDimAlpha,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          // 内框铺满整个 Hero：加载时占位灰即满幅，完成后前景图居中、
+          // 两侧留白透出底下的全幅模糊，不再有黑边距。
+          _HeroImageFrame(
+            imageKey: mainImageKey,
+            imageUrl: mainImageUrl,
+          ),
+          Positioned(
+            top: spacing.sm,
+            left: spacing.sm,
+            child: Wrap(
+              spacing: spacing.xs,
+              runSpacing: spacing.xs,
+              children: [
+                SubscriptionHeartBadge(
+                  key: const Key('movie-detail-hero-subscription-icon'),
+                  loadingKey: const Key(
+                    'movie-detail-hero-subscription-loading',
+                  ),
+                  isSubscribed: isSubscribed,
+                  isUpdating: isSubscriptionUpdating,
+                  onTap: onSubscriptionTap,
+                ),
+                if (canPlay)
+                  const _HeroBadge(
+                    label: '可播放',
+                    backgroundColorToken: _HeroBadgeColorToken.playable,
+                  ),
+                if (isCollection) const _HeroBadge(label: '合集'),
+              ],
+            ),
+          ),
+          Positioned(
+            top: spacing.sm,
+            right: spacing.sm,
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Container(
+                  key: const Key('movie-detail-hero-heat-badge'),
+                  padding: EdgeInsets.symmetric(
+                    horizontal: spacing.sm,
+                    vertical: spacing.xs,
+                  ),
+                  decoration: BoxDecoration(
+                    color: colors.mediaOverlayStrong,
+                    borderRadius: context.appRadius.pillBorder,
+                    border: Border.all(
+                      color: colors.borderSubtle.withValues(alpha: 0.42),
+                    ),
+                  ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(
+                        Icons.local_fire_department_rounded,
+                        size: tokens.iconSizeXs,
+                        color: colors.movieDetailHeatIcon,
+                      ),
+                      SizedBox(width: spacing.xs),
+                      Text(
+                        '$heat',
+                        key: const Key('movie-detail-hero-heat-text'),
+                        style: resolveAppTextStyle(
+                          context,
+                          size: AppTextSize.s12,
+                          weight: AppTextWeight.regular,
+                          tone: AppTextTone.onMedia,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                SizedBox(width: spacing.xs),
+                _HeroMoreActionsButton(
+                  isUpdating: isMoreActionsUpdating,
+                  onTap: onMoreActionsTap,
+                ),
+              ],
+            ),
+          ),
+          if (watchLabel != null)
+            Positioned(
+              left: spacing.md,
+              bottom: spacing.md,
+              right: spacing.md,
+              child: Align(
+                alignment: Alignment.centerLeft,
+                child: Tooltip(
+                  message: watchTooltip ?? watchLabel!,
+                  child: Container(
+                    padding: EdgeInsets.symmetric(horizontal: spacing.sm, vertical: spacing.xs),
+                    decoration: BoxDecoration(
+                      color: colors.mediaOverlayStrong,
+                      borderRadius: context.appRadius.smBorder,
+                    ),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(Icons.history_rounded, size: tokens.iconSizeXs, color: context.appTextPalette.onMedia),
+                        SizedBox(width: spacing.xs),
+                        Flexible(child: Text(watchLabel!, maxLines: 1, overflow: TextOverflow.ellipsis,
+                          style: resolveAppTextStyle(context, size: AppTextSize.s12, tone: AppTextTone.onMedia),
+                        )),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          if (onPlayTap != null || isPlayLoading)
+            Positioned.fill(
+              child: Center(
+                child: MouseRegion(
+                  cursor: SystemMouseCursors.click,
+                  child: Material(
+                    color: Colors.transparent,
+                    child: InkWell(
+                      mouseCursor: !isPlayLoading && onPlayTap != null
+                          ? SystemMouseCursors.click
+                          : SystemMouseCursors.basic,
+                      key: const Key('movie-detail-hero-play-button'),
+                      customBorder: const CircleBorder(),
+                      onTap: isPlayLoading ? null : onPlayTap,
+                      child: Container(
+                        width: 72,
+                        height: 72,
+                        decoration: BoxDecoration(
+                          color: colors.movieDetailEmptyBackground.withValues(
+                            alpha: 0.28,
+                          ),
+                          shape: BoxShape.circle,
+                        ),
+                        child: isPlayLoading
+                            ? Padding(
+                                padding: const EdgeInsets.all(22),
+                                child: CircularProgressIndicator.adaptive(
+                                  backgroundColor: switch (Theme.of(context).platform) {
+                                    TargetPlatform.iOS || TargetPlatform.macOS => Colors.white,
+                                    _ => null,
+                                  },
+                                  strokeWidth: 3,
+                                  valueColor: AlwaysStoppedAnimation<Color?>(Colors.white),
+                                ),
+                              )
+                            : Icon(
+                                Icons.play_arrow_rounded,
+                                color: context.appTextPalette.onMedia,
+                                size: tokens.iconSize4xl,
+                              ),
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+class _HeroImageFrame extends StatelessWidget {
+  const _HeroImageFrame({required this.imageKey, required this.imageUrl});
+
+  final String imageKey;
+  final String? imageUrl;
+
+  /// 背景模糊强度：刚好盖住两侧留白，又不至于把原图颜色糊没。
+  static const double backgroundBlurSigma = 24;
+
+  /// 背景压暗：让前景清晰图和中央播放按钮在亮封面上依然可读。
+  static const double backgroundDimAlpha = 0.35;
+
+  @override
+  Widget build(BuildContext context) {
+    final content = imageUrl == null || imageUrl!.isEmpty
+        ? DecoratedBox(
+            decoration: BoxDecoration(
+              color: context.appColors.movieDetailEmptyBackground,
+              borderRadius: context.appRadius.lgBorder,
+            ),
+            child: Center(
+              child: Icon(
+                Icons.image_outlined,
+                size: context.appComponentTokens.iconSize3xl,
+                color: context.appTextPalette.muted,
+              ),
+            ),
+          )
+        : ClipRRect(
+            borderRadius: context.appRadius.lgBorder,
+            child: MaskedImage(url: imageUrl!, fit: BoxFit.fitHeight),
+          );
+
+    return SizedBox(
+      key: Key('movie-detail-main-image-$imageKey'),
+      width: double.infinity,
+      height: double.infinity,
+      child: content,
+    );
+  }
+}
+
+class _HeroBadge extends StatelessWidget {
+  const _HeroBadge({
+    required this.label,
+    this.backgroundColorToken = _HeroBadgeColorToken.defaultMuted,
+  });
+
+  final String label;
+  final _HeroBadgeColorToken backgroundColorToken;
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = context.appColors;
+
+    return Container(
+      padding: EdgeInsets.symmetric(
+        horizontal: context.appSpacing.sm,
+        vertical: context.appSpacing.xs,
+      ),
+      decoration: BoxDecoration(
+        color: backgroundColorToken == _HeroBadgeColorToken.playable
+            ? colors.movieDetailPlayableBadgeBackground
+            : colors.movieDetailEmptyBackground.withValues(alpha: 0.9),
+        borderRadius: context.appRadius.xsBorder,
+      ),
+      child: Text(
+        label,
+        style: resolveAppTextStyle(
+          context,
+          size: AppTextSize.s12,
+          weight: AppTextWeight.regular,
+          tone: AppTextTone.onMedia,
+        ),
+      ),
+    );
+  }
+}
+
+enum _HeroBadgeColorToken { defaultMuted, playable }
+
+class _HeroMoreActionsButton extends StatelessWidget {
+  const _HeroMoreActionsButton({required this.isUpdating, required this.onTap});
+
+  final bool isUpdating;
+  final Future<void> Function(Offset globalPosition)? onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = context.appColors;
+    final spacing = context.appSpacing;
+    final tokens = context.appComponentTokens;
+
+    final button = Container(
+      key: const Key('movie-detail-hero-more-actions-button'),
+      padding: EdgeInsets.all(spacing.xs),
+      decoration: BoxDecoration(
+        color: colors.mediaOverlayStrong,
+        borderRadius: context.appRadius.pillBorder,
+        border: Border.all(color: colors.borderSubtle.withValues(alpha: 0.42)),
+      ),
+      child: isUpdating
+          ? SizedBox(
+              width: tokens.iconSizeSm,
+              height: tokens.iconSizeSm,
+              child: CircularProgressIndicator.adaptive(
+                backgroundColor: switch (Theme.of(context).platform) {
+                  TargetPlatform.iOS || TargetPlatform.macOS => context.appTextPalette.onMedia,
+                  _ => null,
+                },
+                key: const Key('movie-detail-hero-more-actions-loading'),
+                strokeWidth: 2,
+                valueColor: AlwaysStoppedAnimation<Color?>(context.appTextPalette.onMedia),
+              ),
+            )
+          : Icon(
+              Icons.more_horiz_rounded,
+              size: tokens.iconSizeSm,
+              color: context.appTextPalette.onMedia,
+            ),
+    );
+
+    if (onTap == null || isUpdating) {
+      return button;
+    }
+
+    return MouseRegion(
+      cursor: SystemMouseCursors.click,
+      child: GestureDetector(
+        behavior: HitTestBehavior.translucent,
+        onTapDown: (details) => onTap!(details.globalPosition),
+        child: button,
+      ),
+    );
+  }
+}

@@ -1,0 +1,968 @@
+import 'package:sakuramedia/widgets/base/actions/app_switch.dart';
+import 'package:sakuramedia/widgets/base/forms/app_password_field.dart';
+import 'dart:async';
+
+import 'package:material_ui/material_ui.dart';
+import 'package:oktoast/oktoast.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:sakuramedia/features/configuration/presentation/providers/config_api_provider.dart';
+import 'package:sakuramedia/core/network/api_error_message.dart';
+import 'package:sakuramedia/core/validation/url_validators.dart';
+import 'package:sakuramedia/features/configuration/data/api/config_api.dart';
+import 'package:sakuramedia/features/configuration/data/dto/config_dto.dart';
+import 'package:sakuramedia/features/shared/presentation/restart_messages.dart';
+import 'package:sakuramedia/features/status/presentation/providers/server_capabilities_provider.dart';
+import 'package:sakuramedia/theme.dart';
+import 'package:sakuramedia/widgets/base/actions/app_button.dart';
+import 'package:sakuramedia/widgets/base/layout/cards/app_badge.dart';
+import 'package:sakuramedia/widgets/base/layout/cards/app_content_card.dart';
+import 'package:sakuramedia/widgets/base/layout/cards/app_settings_group.dart';
+import 'package:sakuramedia/widgets/base/feedback/app_confirm_dialog.dart';
+import 'package:sakuramedia/widgets/base/feedback/app_section_error.dart';
+import 'package:sakuramedia/widgets/base/feedback/app_section_skeleton.dart';
+import 'package:sakuramedia/widgets/base/forms/app_select_field.dart';
+import 'package:sakuramedia/widgets/base/forms/app_text_field.dart';
+import 'package:sakuramedia/widgets/base/interaction/refresh/app_page_refresh_scope.dart';
+
+class DesktopAdvancedSettingsSection extends ConsumerStatefulWidget {
+  const DesktopAdvancedSettingsSection({
+    super.key,
+    required this.active,
+    this.onDirtyChanged,
+  });
+
+  final bool active;
+  final ValueChanged<bool>? onDirtyChanged;
+
+  @override
+  ConsumerState<DesktopAdvancedSettingsSection> createState() =>
+      _DesktopAdvancedSettingsSectionState();
+}
+
+class _DesktopAdvancedSettingsSectionState
+    extends ConsumerState<DesktopAdvancedSettingsSection> {
+  final GlobalKey<FormState> _mediaFormKey = GlobalKey<FormState>();
+  final GlobalKey<FormState> _schedulerFormKey = GlobalKey<FormState>();
+  final GlobalKey<FormState> _otherFormKey = GlobalKey<FormState>();
+
+  late final TextEditingController _allowedMinVideoFileSizeController;
+  late final TextEditingController _workerDefaultConcurrencyController;
+  late final Map<String, TextEditingController> _cronControllers;
+
+  final Set<_AdvancedCardKind> _dirtyCards = <_AdvancedCardKind>{};
+  final Set<_AdvancedCardKind> _savingCards = <_AdvancedCardKind>{};
+
+  final _optionalFormKey = GlobalKey<FormState>();
+  final _qdrantUrl = TextEditingController();
+  final _qdrantKey = TextEditingController();
+  final _inferenceUrl = TextEditingController();
+  final _inferenceKey = TextEditingController();
+  bool _hasOptionalServices = false;
+  bool _qdrantEnabled = false;
+  bool _imageSearchEnabled = false;
+
+  bool _initialized = false;
+  bool _isLoading = false;
+  String? _errorMessage;
+  String _loggingLevel = _defaultLoggingLevel;
+  String _savedLoggingLevel = _defaultLoggingLevel;
+
+  ConfigApi get _api => ref.read(configApiProvider);
+
+  @override
+  void initState() {
+    super.initState();
+    _allowedMinVideoFileSizeController = TextEditingController();
+    _workerDefaultConcurrencyController = TextEditingController();
+    _cronControllers = <String, TextEditingController>{
+      for (final key in AdvancedSchedulerConfigDto.cronKeys)
+        key: TextEditingController(),
+    };
+    if (widget.active) {
+      unawaited(_load());
+    }
+  }
+
+  @override
+  void didUpdateWidget(covariant DesktopAdvancedSettingsSection oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (widget.active && !_initialized && !_isLoading) {
+      unawaited(_load());
+    }
+  }
+
+  @override
+  void dispose() {
+    _qdrantUrl.dispose();
+    _qdrantKey.dispose();
+    _inferenceUrl.dispose();
+    _inferenceKey.dispose();
+    _allowedMinVideoFileSizeController.dispose();
+    _workerDefaultConcurrencyController.dispose();
+    for (final controller in _cronControllers.values) {
+      controller.dispose();
+    }
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (!_initialized && !widget.active) {
+      return const SizedBox.shrink();
+    }
+
+    final content = _buildContent(context);
+    return widget.active
+        ? AppPageRefreshScope(onRefresh: _refresh, child: content)
+        : content;
+  }
+
+  Widget _buildContent(BuildContext context) {
+    if (_isLoading) {
+      return const AppSectionSkeleton(lineCount: _advancedSkeletonLineCount);
+    }
+    if (_errorMessage != null) {
+      return AppSectionError(
+        title: '高级设置加载失败',
+        message: _errorMessage!,
+        onRetry: _load,
+      );
+    }
+
+    final spacing = context.appSpacing;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        _buildMediaCard(context),
+        SizedBox(height: spacing.xl),
+        if (_hasOptionalServices) ...[
+          _buildOptionalServicesCard(context),
+          SizedBox(height: spacing.xl),
+        ],
+        _buildSchedulerCard(context),
+        SizedBox(height: spacing.xl),
+        _buildOtherCard(context),
+      ],
+    );
+  }
+
+  Widget _buildOptionalServicesCard(BuildContext context) {
+    final spacing = context.appSpacing;
+    final saving = _savingCards.contains(_AdvancedCardKind.optionalServices);
+    return AppContentCard(
+      key: const Key('configuration-optional-services-card'),
+      title: '图搜 / 相似度',
+      padding: EdgeInsets.all(spacing.lg),
+      headerBottomSpacing: spacing.md,
+      headerTrailing: _CardBadges(badges: [
+        const AppBadge(label: '重启容器生效', tone: AppBadgeTone.warning),
+        if (_dirtyCards.contains(_AdvancedCardKind.optionalServices))
+          const AppBadge(label: '未保存', tone: AppBadgeTone.warning),
+      ]),
+      child: Form(key: _optionalFormKey, child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const _CardTip(icon: Icons.info_outline_rounded,
+            message: '保存后重启后端容器生效。关闭功能会保留索引；如需释放内存，请同时停止对应的可选容器。重新启用后可在系统维护中重建图搜索引，在任务中心重算相似影片。'),
+          SizedBox(height: spacing.md),
+          _optionalSwitch(
+            key: const Key('configuration-qdrant-enabled'),
+            title: '启用相似影片与向量服务',
+            subtitle: '使用 Qdrant 提供相似影片，并增强推荐结果',
+            value: _qdrantEnabled,
+            onChanged: saving ? null : _changeQdrantEnabled,
+          ),
+          if (_qdrantEnabled) _buildFieldGrid(context, children: [
+            AppTextField(controller: _qdrantUrl, label: 'Qdrant 地址',
+              hintText: 'http://qdrant:6333',
+              helperText: '按快速开始的 Compose 示例部署时，默认即此地址，API Key 留空即可。',
+              fieldKey: const Key('configuration-qdrant-url'), enabled: !saving,
+              validator: _httpUrlError, onChanged: (_) => _markDirty(_AdvancedCardKind.optionalServices)),
+            AppPasswordField(controller: _qdrantKey, label: 'Qdrant API Key（可选）', enabled: !saving,
+              onChanged: (_) => _markDirty(_AdvancedCardKind.optionalServices)),
+          ]),
+          SizedBox(height: spacing.md),
+          _optionalSwitch(
+            key: const Key('configuration-image-search-enabled'),
+            title: '启用图片与文字搜图',
+            subtitle: _qdrantEnabled ? '使用嵌入服务生成图片与文字向量，并增强时刻推荐' : '需先启用上方的相似影片与向量服务',
+            value: _imageSearchEnabled,
+            onChanged: saving || !_qdrantEnabled ? null : (value) {
+              setState(() => _imageSearchEnabled = value);
+              _markDirty(_AdvancedCardKind.optionalServices);
+            },
+          ),
+          if (_imageSearchEnabled) _buildFieldGrid(context, children: [
+            AppTextField(controller: _inferenceUrl, label: '嵌入服务地址',
+              hintText: 'http://siglip2-embed:8080',
+              helperText: '按快速开始的 Compose 示例部署时，默认即此地址，API Key 留空即可。',
+              fieldKey: const Key('configuration-inference-url'), enabled: !saving,
+              validator: _httpUrlError, onChanged: (_) => _markDirty(_AdvancedCardKind.optionalServices)),
+            AppPasswordField(controller: _inferenceKey, label: '嵌入服务 API Key（可选）', enabled: !saving,
+              onChanged: (_) => _markDirty(_AdvancedCardKind.optionalServices)),
+          ]),
+          SizedBox(height: spacing.lg),
+          _buildActions(context,
+            buttonKey: const Key('configuration-optional-services-save'),
+            isSaving: saving, onSave: _saveOptionalServices),
+        ],
+      )),
+    );
+  }
+
+  Widget _optionalSwitch({required Key key, required String title,
+    required String subtitle, required bool value, required ValueChanged<bool>? onChanged}) {
+    return AppSettingCell(
+      padding: EdgeInsets.symmetric(vertical: context.appSpacing.md),
+      title: title,
+      subtitle: subtitle,
+      onTap: onChanged == null ? null : () => onChanged(!value),
+      trailing: AppSwitch(key: key, value: value, onChanged: onChanged),
+    );
+  }
+
+  Future<void> _changeQdrantEnabled(bool value) async {
+    if (!value && _imageSearchEnabled) {
+      final confirmed = await showAppConfirmDialog(context,
+        title: '关闭向量服务', message: '图片与文字搜图依赖 Qdrant，将同时关闭。已有配置与索引会保留，保存并重启后生效。',
+        confirmLabel: '同时关闭');
+      if (!confirmed || !mounted) return;
+    }
+    setState(() {
+      _qdrantEnabled = value;
+      if (!value) _imageSearchEnabled = false;
+    });
+    _markDirty(_AdvancedCardKind.optionalServices);
+  }
+
+  String? _httpUrlError(String? value) {
+    return isValidHttpUrl(value ?? '') ? null : '请输入有效的 HTTP 或 HTTPS 地址';
+  }
+
+  Future<void> _saveOptionalServices() async {
+    if (!(_optionalFormKey.currentState?.validate() ?? false)) return;
+    await _savePartial(_AdvancedCardKind.optionalServices, {
+      'qdrant': {'enabled': _qdrantEnabled, 'url': _qdrantUrl.text.trim(), 'api_key': _qdrantKey.text.trim()},
+      'image_search': {'enabled': _imageSearchEnabled, 'inference_base_url': _inferenceUrl.text.trim(), 'inference_api_key': _inferenceKey.text.trim()},
+    }, (values) => _applyOptionalServices(values.optionalServices));
+  }
+
+  void _applyOptionalServices(OptionalServicesConfigDto? config) {
+    _hasOptionalServices = config != null;
+    if (config == null) return;
+    _qdrantEnabled = config.qdrantEnabled;
+    _imageSearchEnabled = config.imageSearchEnabled;
+    _qdrantUrl.text = config.qdrantUrl;
+    _qdrantKey.text = config.qdrantApiKey;
+    _inferenceUrl.text = config.inferenceUrl;
+    _inferenceKey.text = config.inferenceApiKey;
+  }
+
+  Widget _buildMediaCard(BuildContext context) {
+    final spacing = context.appSpacing;
+    return AppContentCard(
+      key: const Key('configuration-advanced-media-card'),
+      title: '媒体导入',
+      padding: EdgeInsets.all(spacing.lg),
+      headerBottomSpacing: spacing.md,
+      headerTrailing: _CardBadges(
+        badges: [
+          const AppBadge(label: '重启容器生效', tone: AppBadgeTone.warning),
+          if (_dirtyCards.contains(_AdvancedCardKind.media))
+            const AppBadge(label: '未保存', tone: AppBadgeTone.warning),
+        ],
+      ),
+      child: Form(
+        key: _mediaFormKey,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const _CardTip(
+              icon: Icons.info_outline_rounded,
+              message: '这组配置仅控制 JAV 类影片导入的最小文件大小。第一次部署通常保持默认。',
+            ),
+            SizedBox(height: spacing.lg),
+            _buildFieldGrid(
+              context,
+              children: [
+                AppTextField(
+                  fieldKey: const Key(
+                    'configuration-advanced-min-video-size-field',
+                  ),
+                  controller: _allowedMinVideoFileSizeController,
+                  label: '允许导入的视频最小体积',
+                  hintText: '建议不低于 256',
+                  helperText: 'UI 按 MB 编辑，保存时会转换为字节；不建议低于 256 MB。',
+                  keyboardType: TextInputType.number,
+                  suffix: const _UnitSuffix(label: 'MB'),
+                  tightSuffix: true,
+                  validator: (value) => _positiveIntError(value, label: '最小体积'),
+                  onChanged: (_) => _markDirty(_AdvancedCardKind.media),
+                ),
+              ],
+            ),
+            SizedBox(height: spacing.lg),
+            _buildActions(
+              context,
+              buttonKey: const Key('configuration-advanced-media-save-button'),
+              isSaving: _savingCards.contains(_AdvancedCardKind.media),
+              onSave: _handleSaveMedia,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildSchedulerCard(BuildContext context) {
+    final spacing = context.appSpacing;
+    return AppContentCard(
+      key: const Key('configuration-advanced-scheduler-card'),
+      title: '定时任务频率',
+      padding: EdgeInsets.all(spacing.lg),
+      headerBottomSpacing: spacing.md,
+      headerTrailing: _CardBadges(
+        badges: [
+          const AppBadge(label: '重启容器生效', tone: AppBadgeTone.warning),
+          if (_dirtyCards.contains(_AdvancedCardKind.scheduler))
+            const AppBadge(label: '未保存', tone: AppBadgeTone.warning),
+        ],
+      ),
+      child: Form(
+        key: _schedulerFormKey,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const _CardTip(
+              icon: Icons.schedule_outlined,
+              message:
+                  'Cron 语法：分 时 日 月 周（*/N 每隔 N，逗号列表，连字符区间）；普通任务并发数控制同时执行的任务数量。修改后需要重启容器才生效。',
+            ),
+            SizedBox(height: spacing.lg),
+            const _SubsectionTitle(title: '普通任务执行'),
+            SizedBox(height: spacing.md),
+            _buildFieldGrid(
+              context,
+              children: [
+                AppTextField(
+                  fieldKey: const Key(
+                    'configuration-advanced-worker-default-concurrency-field',
+                  ),
+                  controller: _workerDefaultConcurrencyController,
+                  label: '普通任务并发数',
+                  hintText: '4',
+                  helperText: '导入和存储迁移任务使用独立并发，不受此设置影响。',
+                  keyboardType: TextInputType.number,
+                  suffix: const _UnitSuffix(label: '个'),
+                  tightSuffix: true,
+                  validator: _workerConcurrencyError,
+                  onChanged: (_) =>
+                      _markDirty(_AdvancedCardKind.scheduler),
+                ),
+              ],
+            ),
+            SizedBox(height: spacing.lg),
+            for (final group in _cronGroups) ...[
+              _SubsectionTitle(title: group.title),
+              SizedBox(height: spacing.md),
+              _buildFieldGrid(
+                context,
+                children: [
+                  for (final key in group.keys)
+                    AppTextField(
+                      fieldKey: Key('configuration-advanced-cron-$key-field'),
+                      controller: _cronControllers[key],
+                      label: _cronCopy[key] ?? key,
+                      hintText: '0 2 * * *',
+                      helperText: _cronFieldHelper[key],
+                      validator: _cronError,
+                      onChanged: (_) => _markDirty(_AdvancedCardKind.scheduler),
+                    ),
+                ],
+              ),
+              if (group != _cronGroups.last) SizedBox(height: spacing.lg),
+            ],
+            SizedBox(height: spacing.lg),
+            _buildActions(
+              context,
+              buttonKey: const Key(
+                'configuration-advanced-scheduler-save-button',
+              ),
+              isSaving: _savingCards.contains(_AdvancedCardKind.scheduler),
+              onSave: _handleSaveScheduler,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildOtherCard(BuildContext context) {
+    final spacing = context.appSpacing;
+    return AppContentCard(
+      key: const Key('configuration-advanced-other-card'),
+      title: '日志',
+      padding: EdgeInsets.all(spacing.lg),
+      headerBottomSpacing: spacing.md,
+      headerTrailing: _CardBadges(
+        badges: [
+          const AppBadge(label: '重启容器生效', tone: AppBadgeTone.warning),
+          if (_dirtyCards.contains(_AdvancedCardKind.other))
+            const AppBadge(label: '未保存', tone: AppBadgeTone.warning),
+        ],
+      ),
+      child: Form(
+        key: _otherFormKey,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const _CardTip(
+              icon: Icons.tune_outlined,
+              message: '日志等级平时保持 INFO，排查问题时再临时改成 DEBUG。',
+            ),
+            SizedBox(height: spacing.lg),
+            _buildFieldGrid(
+              context,
+              children: [
+                AppSelectField<String>(
+                  key: const Key('configuration-advanced-logging-level-field'),
+                  label: '日志等级',
+                  value: _loggingLevel,
+                  items: [
+                    for (final level in _loggingLevels)
+                      DropdownMenuItem<String>(
+                        value: level,
+                        child: Text(level),
+                      ),
+                  ],
+                  onChanged: _savingCards.contains(_AdvancedCardKind.other)
+                      ? null
+                      : (value) {
+                          if (value == null || value == _loggingLevel) {
+                            return;
+                          }
+                          setState(() {
+                            _loggingLevel = value;
+                          });
+                          _markDirty(_AdvancedCardKind.other);
+                        },
+                ),
+              ],
+            ),
+            SizedBox(height: spacing.lg),
+            _buildActions(
+              context,
+              buttonKey: const Key('configuration-advanced-other-save-button'),
+              isSaving: _savingCards.contains(_AdvancedCardKind.other),
+              onSave: _handleSaveOther,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildFieldGrid(
+    BuildContext context, {
+    required List<Widget> children,
+  }) {
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final spacing = context.appSpacing;
+        final layout = context.appLayoutTokens;
+        final minTwoColumnWidth = layout.filterFieldWidthXl * 2 + spacing.md;
+        final useTwoColumns = constraints.maxWidth >= minTwoColumnWidth;
+        final fieldWidth = useTwoColumns
+            ? (constraints.maxWidth - spacing.md) / 2
+            : constraints.maxWidth;
+        return Wrap(
+          spacing: spacing.md,
+          runSpacing: spacing.md,
+          children: [
+            for (final child in children)
+              SizedBox(width: fieldWidth, child: child),
+          ],
+        );
+      },
+    );
+  }
+
+  Widget _buildActions(
+    BuildContext context, {
+    required Key buttonKey,
+    required bool isSaving,
+    required VoidCallback onSave,
+  }) {
+    return Row(
+      mainAxisAlignment: MainAxisAlignment.end,
+      children: [
+        SizedBox(
+          width: context.appLayoutTokens.filterFieldWidthMd,
+          child: AppButton(
+            key: buttonKey,
+            label: '保存',
+            variant: AppButtonVariant.primary,
+            isLoading: isSaving,
+            onPressed: onSave,
+          ),
+        ),
+      ],
+    );
+  }
+
+  Future<void> _load() async {
+    if (_isLoading) {
+      return;
+    }
+    // 打开/刷新高级设置时顺带重探服务器能力：可选服务开关保存并重启容器后，
+    // 无需等概览刷新即可让侧栏与页面入口恢复。
+    _scheduleCapabilitiesRefresh();
+    setState(() {
+      _isLoading = true;
+      _errorMessage = null;
+    });
+
+    try {
+      final resource = await _api.get();
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _applyResource(resource);
+        _initialized = true;
+        _isLoading = false;
+      });
+      _notifyDirtyChanged();
+    } catch (error) {
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _initialized = true;
+        _isLoading = false;
+        _errorMessage = apiErrorMessage(error, fallback: '高级设置加载失败');
+      });
+    }
+  }
+
+  /// `_load` 可能由 `didUpdateWidget` 在 build 阶段触发，而 Riverpod 的
+  /// `invalidate` 会同步对 ProviderScope 调用 `setState`，因此延后到帧结束。
+  void _scheduleCapabilitiesRefresh() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) {
+        return;
+      }
+      ref.invalidate(serverCapabilitiesProvider);
+    });
+  }
+
+  Future<void> _refresh() async {
+    if (_isLoading || _savingCards.isNotEmpty) {
+      return;
+    }
+    if (_dirtyCards.isNotEmpty) {
+      final confirmed = await showAppConfirmDialog(
+        context,
+        title: '有未保存的改动',
+        message: '刷新将丢弃当前未保存的高级设置，确认刷新？',
+        confirmLabel: '刷新',
+        dialogKey: const Key('configuration-advanced-refresh-confirm-dialog'),
+        confirmKey: const Key('configuration-advanced-refresh-confirm-button'),
+        cancelKey: const Key('configuration-advanced-refresh-cancel-button'),
+      );
+      if (!confirmed || !mounted) {
+        return;
+      }
+    }
+    await _load();
+  }
+
+  Future<void> _handleSaveMedia() async {
+    if (!(_mediaFormKey.currentState?.validate() ?? false)) {
+      return;
+    }
+    await _savePartial(_AdvancedCardKind.media, <String, dynamic>{
+      'media': _buildMediaPayload(),
+    }, (values) => _applyMedia(values.media));
+  }
+
+  Future<void> _handleSaveScheduler() async {
+    if (!(_schedulerFormKey.currentState?.validate() ?? false)) {
+      return;
+    }
+    await _savePartial(_AdvancedCardKind.scheduler, <String, dynamic>{
+      'scheduler': _buildSchedulerPayload(),
+    }, (values) => _applyScheduler(values.scheduler));
+  }
+
+  Future<void> _handleSaveOther() async {
+    if (!(_otherFormKey.currentState?.validate() ?? false)) return;
+    if (_loggingLevel != _savedLoggingLevel) {
+      final confirmed = await showAppConfirmDialog(
+        context,
+        title: '确认修改日志等级',
+        message: '修改日志等级将重启容器，页面会临时无响应并需刷新，是否继续？',
+        confirmLabel: '继续保存',
+        dialogKey: const Key('configuration-advanced-logging-confirm-dialog'),
+        confirmKey: const Key('configuration-advanced-logging-confirm-button'),
+        cancelKey: const Key('configuration-advanced-logging-cancel-button'),
+      );
+      if (!confirmed || !mounted) {
+        return;
+      }
+    }
+    await _savePartial(
+      _AdvancedCardKind.other,
+      <String, dynamic>{'logging': _buildLoggingPayload()},
+      (values) {
+        _applyLogging(values.logging);
+      },
+    );
+  }
+
+  Future<void> _savePartial(
+    _AdvancedCardKind card,
+    Map<String, dynamic> partial,
+    void Function(ConfigResourceDto values) applyValues,
+  ) async {
+    if (_savingCards.contains(card)) {
+      return;
+    }
+    setState(() {
+      _savingCards.add(card);
+    });
+
+    try {
+      final result = await _api.patch(partial);
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        applyValues(result.values);
+        _savingCards.remove(card);
+        _dirtyCards.remove(card);
+      });
+      _notifyDirtyChanged();
+      showToast(buildAdvancedConfigSaveSuccessMessage(result.restartRequired));
+    } catch (error) {
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _savingCards.remove(card);
+      });
+      showToast(apiErrorMessage(error, fallback: '保存高级设置失败'));
+    }
+  }
+
+  Map<String, dynamic> _buildMediaPayload() {
+    return <String, dynamic>{
+      'allowed_min_video_file_size':
+          _parseInt(_allowedMinVideoFileSizeController.text) *
+          _bytesPerMegabyte,
+    };
+  }
+
+  Map<String, dynamic> _buildSchedulerPayload() {
+    return <String, dynamic>{
+      'worker_default_concurrency': _parseInt(
+        _workerDefaultConcurrencyController.text,
+      ),
+      for (final key in AdvancedSchedulerConfigDto.cronKeys)
+        '${key}_cron': _cronControllers[key]!.text.trim(),
+    };
+  }
+
+  Map<String, dynamic> _buildLoggingPayload() {
+    return <String, dynamic>{'level': _loggingLevel};
+  }
+
+  void _applyResource(ConfigResourceDto resource) {
+    _applyOptionalServices(resource.optionalServices);
+    _applyMedia(resource.media);
+    _applyScheduler(resource.scheduler);
+    _applyLogging(resource.logging);
+    _dirtyCards.clear();
+  }
+
+  void _applyMedia(AdvancedMediaConfigDto media) {
+    _allowedMinVideoFileSizeController.text =
+        (media.allowedMinVideoFileSize ~/ _bytesPerMegabyte).toString();
+  }
+
+  void _applyScheduler(AdvancedSchedulerConfigDto scheduler) {
+    _workerDefaultConcurrencyController.text =
+        scheduler.workerDefaultConcurrency.toString();
+    for (final key in AdvancedSchedulerConfigDto.cronKeys) {
+      _cronControllers[key]!.text = scheduler.crons[key]!;
+    }
+  }
+
+  void _applyLogging(AdvancedLoggingConfigDto logging) {
+    _loggingLevel = _loggingLevels.contains(logging.level)
+        ? logging.level
+        : _defaultLoggingLevel;
+    _savedLoggingLevel = _loggingLevel;
+  }
+
+  void _markDirty(_AdvancedCardKind card) {
+    setState(() {
+      _dirtyCards.add(card);
+    });
+    _notifyDirtyChanged();
+  }
+
+  void _notifyDirtyChanged() {
+    widget.onDirtyChanged?.call(_dirtyCards.isNotEmpty);
+  }
+
+  String? _cronError(String? value) {
+    final parts = (value?.trim() ?? '')
+        .split(RegExp(r'\s+'))
+        .where((part) => part.isNotEmpty)
+        .toList();
+    if (parts.length != _cronPartCount) {
+      return '请输入 5 位标准 cron';
+    }
+    return null;
+  }
+
+  String? _positiveIntError(String? value, {required String label}) {
+    final parsed = int.tryParse(value?.trim() ?? '');
+    if (parsed == null || parsed <= 0) {
+      return '请输入大于 0 的$label';
+    }
+    return null;
+  }
+
+  String? _workerConcurrencyError(String? value) {
+    final parsed = int.tryParse(value?.trim() ?? '');
+    if (parsed == null ||
+        parsed < _workerConcurrencyMin ||
+        parsed > _workerConcurrencyMax) {
+      return '请输入 $_workerConcurrencyMin–$_workerConcurrencyMax 的整数';
+    }
+    return null;
+  }
+
+  int _parseInt(String value) {
+    return int.parse(value.trim());
+  }
+}
+
+enum _AdvancedCardKind { media, scheduler, other, optionalServices }
+
+/// 根据 `PATCH /config` 响应里的 `restart_required` 列表拼保存成功后的 toast 文案。
+///
+/// 抽为顶层函数便于单元测试（widget 测里 oktoast 在 test env 下不可靠）。
+String buildAdvancedConfigSaveSuccessMessage(List<String> restartRequired) {
+  if (restartRequired.isEmpty) {
+    return '已保存';
+  }
+  return buildRestartRequiredMessage('已保存');
+}
+
+class _CardBadges extends StatelessWidget {
+  const _CardBadges({required this.badges});
+
+  final List<Widget> badges;
+
+  @override
+  Widget build(BuildContext context) {
+    return Wrap(
+      spacing: context.appSpacing.sm,
+      runSpacing: context.appSpacing.xs,
+      alignment: WrapAlignment.end,
+      children: badges,
+    );
+  }
+}
+
+class _CardTip extends StatelessWidget {
+  const _CardTip({required this.icon, required this.message});
+
+  final IconData icon;
+  final String message;
+
+  @override
+  Widget build(BuildContext context) {
+    final spacing = context.appSpacing;
+    return Container(
+      width: double.infinity,
+      padding: EdgeInsets.all(spacing.md),
+      decoration: BoxDecoration(
+        color: context.appColors.noticeSurface,
+        borderRadius: context.appRadius.mdBorder,
+        border: Border.all(color: context.appColors.borderSubtle),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(
+            icon,
+            size: context.appComponentTokens.iconSizeSm,
+            color: context.appTextPalette.muted,
+          ),
+          SizedBox(width: spacing.sm),
+          Expanded(
+            child: Text(
+              message,
+              style: resolveAppTextStyle(
+                context,
+                size: AppTextSize.s12,
+                weight: AppTextWeight.regular,
+                tone: AppTextTone.secondary,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _SubsectionTitle extends StatelessWidget {
+  const _SubsectionTitle({required this.title});
+
+  final String title;
+
+  @override
+  Widget build(BuildContext context) {
+    return Text(
+      title,
+      style: resolveAppTextStyle(
+        context,
+        size: AppTextSize.s14,
+        weight: AppTextWeight.semibold,
+        tone: AppTextTone.primary,
+      ),
+    );
+  }
+}
+
+class _UnitSuffix extends StatelessWidget {
+  const _UnitSuffix({required this.label});
+
+  final String label;
+
+  @override
+  Widget build(BuildContext context) {
+    return Align(
+      widthFactor: 1,
+      heightFactor: 1,
+      alignment: Alignment.centerRight,
+      child: Padding(
+        padding: EdgeInsets.only(right: context.appSpacing.md),
+        child: Text(
+          label,
+          style: resolveAppTextStyle(
+            context,
+            size: AppTextSize.s12,
+            weight: AppTextWeight.regular,
+            tone: AppTextTone.muted,
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _CronGroup {
+  const _CronGroup({required this.title, required this.keys});
+
+  final String title;
+  final List<String> keys;
+}
+
+const int _bytesPerMegabyte = 1024 * 1024;
+const int _advancedSkeletonLineCount = 8;
+const int _cronPartCount = 5;
+const int _workerConcurrencyMin = 1;
+const int _workerConcurrencyMax = 32;
+const String _defaultLoggingLevel = 'INFO';
+const List<String> _loggingLevels = <String>[
+  'DEBUG',
+  'INFO',
+  'WARNING',
+  'ERROR',
+  'CRITICAL',
+];
+
+const List<_CronGroup> _cronGroups = <_CronGroup>[
+  _CronGroup(
+    title: '下载 / 导入',
+    keys: <String>[
+      'download_task_sync',
+      'download_task_auto_import',
+      'subscribed_movie_auto_download',
+    ],
+  ),
+  _CronGroup(
+    title: '抓取 / 回填',
+    keys: <String>[
+      'actor_subscription_sync',
+      'media_file_hash_backfill',
+      'gfriends_filetree_refresh',
+    ],
+  ),
+  _CronGroup(
+    title: '图搜 / 相似度',
+    keys: <String>['image_search_index', 'movie_similarity_recompute'],
+  ),
+  _CronGroup(
+    title: '推荐',
+    keys: <String>[
+      'moment_recommendation_generate',
+      'daily_recommendation_generate',
+    ],
+  ),
+  _CronGroup(
+    title: '巡检 / 清理',
+    keys: <String>[
+      'media_thumbnail',
+      'movie_heat',
+      'movie_interaction_sync',
+      'movie_javdb_backfill',
+      'media_file_scan',
+      'activity_cleanup',
+    ],
+  ),
+];
+
+const Map<String, String> _cronCopy = <String, String>{
+  'actor_subscription_sync': '订阅演员影片同步',
+  'subscribed_movie_auto_download': '已订阅缺失影片自动下载',
+  'download_task_sync': '下载任务状态同步',
+  'download_task_auto_import': '已完成下载自动导入',
+  'movie_heat': '影片热度更新',
+  'movie_interaction_sync': '影片互动数同步',
+  'movie_javdb_backfill': 'JavDB 影片补录',
+  'media_file_hash_backfill': '媒体文件哈希补算',
+  'media_file_scan': '媒体文件巡检',
+  'media_thumbnail': '媒体缩略图生成',
+  'image_search_index': '图像搜索索引构建',
+  'movie_similarity_recompute': '影片相似度重算',
+  'moment_recommendation_generate': '推荐时刻生成',
+  'daily_recommendation_generate': '每日推荐快照生成',
+  'activity_cleanup': '任务记录清理',
+  'gfriends_filetree_refresh': 'GFriends 缓存刷新',
+};
+
+const Map<String, String> _cronFieldHelper = <String, String>{
+  'actor_subscription_sync': '同步订阅演员的影片数据。',
+  'subscribed_movie_auto_download': '自动下载已订阅但缺失的影片。',
+  'download_task_sync': '同步下载任务状态。',
+  'download_task_auto_import': '导入已完成的下载任务。',
+  'movie_heat': '重算影片热度。',
+  'movie_interaction_sync': '同步影片互动数，候选仍受分层刷新规则影响。',
+  'movie_javdb_backfill': '尝试从 JavDB 补录到期的插件影片，每部影片间隔 7 天检查。',
+  'media_file_hash_backfill': '补算缺失的媒体文件哈希。',
+  'media_file_scan': '用存储提供方清单校验媒体文件有效性。',
+  'media_thumbnail': '生成媒体缩略图。',
+  'image_search_index': '生成图片搜索索引。',
+  'movie_similarity_recompute': '离线重算影片相似度。',
+  'moment_recommendation_generate': '生成推荐时刻。',
+  'daily_recommendation_generate': '生成每日推荐快照。',
+  'activity_cleanup': '清理任务中心的通知与任务运行数据。',
+  'gfriends_filetree_refresh': '刷新 GFriends Filetree 缓存。',
+};

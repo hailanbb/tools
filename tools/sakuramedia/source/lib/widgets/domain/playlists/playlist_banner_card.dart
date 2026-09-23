@@ -1,0 +1,137 @@
+import 'dart:ui';
+
+import 'package:material_ui/material_ui.dart';
+import 'package:sakuramedia/theme.dart';
+import 'package:sakuramedia/widgets/base/feedback/app_mobile_skeleton.dart';
+import 'package:sakuramedia/widgets/base/media/images/masked_image.dart';
+
+class PlaylistBannerCard extends StatelessWidget {
+  const PlaylistBannerCard({
+    super.key,
+    required this.title,
+    this.coverImageUrl,
+    this.onTap,
+  });
+
+  final String title;
+  final String? coverImageUrl;
+  final VoidCallback? onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = context.appColors;
+    final spacing = context.appSpacing;
+    final Widget blurredBackground;
+    if (coverImageUrl != null && coverImageUrl!.trim().isNotEmpty) {
+      blurredBackground = MaskedImage(url: coverImageUrl!, fit: BoxFit.cover);
+    } else {
+      blurredBackground = DecoratedBox(
+        key: const Key('playlist-banner-placeholder'),
+        decoration: BoxDecoration(
+          gradient: LinearGradient(
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
+            colors: [
+              colors.movieDetailHeroBackgroundStart,
+              Theme.of(context).colorScheme.primary.withValues(alpha: 0.72),
+              colors.movieDetailHeroBackgroundEnd,
+            ],
+          ),
+        ),
+      );
+    }
+
+    final card = Container(
+      height: context.appComponentTokens.playlistBannerHeight,
+      decoration: BoxDecoration(
+        borderRadius: context.appRadius.lgBorder,
+        border: Border.all(color: colors.borderSubtle),
+        boxShadow: context.appShadows.card,
+      ),
+      clipBehavior: Clip.antiAlias,
+      child: Stack(
+        fit: StackFit.expand,
+        children: [
+          Positioned.fill(
+            child: ImageFiltered(
+              imageFilter: ImageFilter.blur(sigmaX: 14, sigmaY: 14),
+              child: blurredBackground,
+            ),
+          ),
+          Positioned.fill(
+            child: DecoratedBox(
+              decoration: BoxDecoration(
+                gradient: LinearGradient(
+                  begin: Alignment.topCenter,
+                  end: Alignment.bottomCenter,
+                  colors: [
+                    colors.mediaOverlaySoft.withValues(alpha: 0.18),
+                    colors.mediaOverlayStrong.withValues(alpha: 0.78),
+                  ],
+                ),
+              ),
+            ),
+          ),
+          Center(
+            child: Padding(
+              padding: EdgeInsets.symmetric(horizontal: spacing.xl),
+              child: Text(
+                title,
+                textAlign: TextAlign.center,
+                style: resolveAppTextStyle(
+                  context,
+                  size: AppTextSize.s20,
+                  weight: AppTextWeight.semibold,
+                  tone: AppTextTone.onMedia,
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+
+    if (onTap == null) {
+      return card;
+    }
+
+    return MouseRegion(
+      cursor: SystemMouseCursors.click,
+      child: Material(
+        color: Colors.transparent,
+        child: InkWell(
+          mouseCursor: SystemMouseCursors.click,
+          borderRadius: context.appRadius.lgBorder,
+          onTap: onTap,
+          child: card,
+        ),
+      ),
+    );
+  }
+}
+
+/// 播放列表横幅骨架，保持真实横幅的高度、圆角和阴影，供列表与详情首屏共用。
+class PlaylistBannerCardSkeleton extends StatelessWidget {
+  const PlaylistBannerCardSkeleton({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = context.appColors;
+    return Container(
+      height: context.appComponentTokens.playlistBannerHeight,
+      decoration: BoxDecoration(
+        color: colors.surfaceCard,
+        borderRadius: context.appRadius.lgBorder,
+        border: Border.all(color: colors.borderSubtle),
+        boxShadow: context.appShadows.card,
+      ),
+      child: Center(
+        child: AppSkeletonBlock(
+          width: 160,
+          height: 20,
+          radius: context.appRadius.smBorder,
+        ),
+      ),
+    );
+  }
+}

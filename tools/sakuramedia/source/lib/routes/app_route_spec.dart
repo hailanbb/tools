@@ -1,0 +1,61 @@
+import 'package:material_ui/material_ui.dart';
+import 'package:sakuramedia/app/app_platform.dart';
+
+class AppNavItem {
+  const AppNavItem({
+    required this.name,
+    required this.label,
+    required this.path,
+    required this.icon,
+    required this.description,
+  });
+
+  final String name;
+  final String label;
+  final String path;
+  final IconData icon;
+  final String description;
+}
+
+class AppNavGroup {
+  const AppNavGroup({
+    required this.id,
+    required this.label,
+    required this.icon,
+    required this.items,
+    this.isCollapsible = true,
+    this.sectionLabel,
+  });
+
+  final String id;
+  final String label;
+  final IconData icon;
+  final List<AppNavItem> items;
+  final bool isCollapsible;
+
+  /// 该组在侧边栏所属分区的标题。`null` 表示该组前不渲染分区标题（如概览置顶）。
+  final String? sectionLabel;
+
+}
+
+class AppRouteSpec {
+  const AppRouteSpec({
+    required this.platform,
+    required this.name,
+    required this.path,
+    required this.title,
+    required this.description,
+    required this.groupId,
+    required this.layout,
+    required this.builder,
+  });
+
+  final AppPlatform platform;
+  final String name;
+  final String path;
+  final String title;
+  final String description;
+  final String groupId;
+  final AppShellLayout layout;
+  final WidgetBuilder builder;
+}

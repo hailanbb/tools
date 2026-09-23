@@ -1,0 +1,358 @@
+import 'package:material_ui/material_ui.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart' show ProviderScope;
+import 'package:flutter_test/flutter_test.dart';
+import 'package:sakuramedia/core/session/providers/session_store_provider.dart';
+import 'package:sakuramedia/core/session/session_store.dart';
+import 'package:sakuramedia/theme.dart';
+import 'package:sakuramedia/widgets/base/media/images/masked_image.dart';
+import 'package:sakuramedia/features/movies/presentation/widgets/detail/movie_detail_hero_card.dart';
+
+void main() {
+  late SessionStore sessionStore;
+
+  setUp(() async {
+    sessionStore = SessionStore.inMemory();
+    await sessionStore.saveBaseUrl('https://api.example.com');
+  });
+
+  testWidgets('movie detail hero card fills the main image height', (
+    WidgetTester tester,
+  ) async {
+    await tester.pumpWidget(_buildApp(sessionStore: sessionStore));
+
+    final maskedImages = tester.widgetList<MaskedImage>(
+      find.byType(MaskedImage),
+    );
+    final mainImage = maskedImages.firstWhere(
+      (widget) => widget.url == '/covers/main.jpg' && widget.fit == BoxFit.fitHeight,
+    );
+
+    expect(mainImage.fit, BoxFit.fitHeight);
+  });
+
+  testWidgets('movie detail hero card shows subscription as heart icon', (
+    WidgetTester tester,
+  ) async {
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [sessionStoreProvider.overrideWithValue(sessionStore)],
+        child: MaterialApp(
+          theme: sakuraThemeData,
+          home: Scaffold(
+            body: SizedBox(
+              width: 1200,
+              child: MovieDetailHeroCard(
+                height: 420,
+                mainImageKey: 'cover',
+                mainImageUrl: '/covers/main.jpg',
+                heat: 24,
+                canPlay: true,
+                isSubscribed: true,
+                isCollection: false,
+                onPlayTap: null,
+                onSubscriptionTap: null,
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+
+    expect(find.text('已收藏'), findsNothing);
+    expect(
+      find.byKey(const Key('movie-detail-hero-subscription-icon')),
+      findsOneWidget,
+    );
+
+    final icon = tester.widget<Icon>(find.byIcon(Icons.favorite_rounded));
+    expect(icon.color, AppColors.defaults().subscriptionHeartIcon);
+    expect(icon.size, AppComponentTokens.defaults().iconSizeXl);
+  });
+
+  testWidgets(
+    'movie detail hero card shows outlined subscription icon and handles tap when unsubscribed',
+    (WidgetTester tester) async {
+      var tapped = false;
+
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [sessionStoreProvider.overrideWithValue(sessionStore)],
+          child: MaterialApp(
+            theme: sakuraThemeData,
+            home: Scaffold(
+              body: SizedBox(
+                width: 1200,
+                child: MovieDetailHeroCard(
+                  height: 420,
+                  mainImageKey: 'cover',
+                  mainImageUrl: '/covers/main.jpg',
+                  heat: 24,
+                  canPlay: true,
+                  isSubscribed: false,
+                  isCollection: false,
+                  onPlayTap: null,
+                  onSubscriptionTap: () {
+                    tapped = true;
+                  },
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
+
+      expect(
+        find.byKey(const Key('movie-detail-hero-subscription-icon')),
+        findsOneWidget,
+      );
+      expect(find.byIcon(Icons.favorite_border_rounded), findsOneWidget);
+
+      await tester.tap(
+        find.byKey(const Key('movie-detail-hero-subscription-icon')),
+      );
+      await tester.pump();
+
+      expect(tapped, isTrue);
+    },
+  );
+
+  testWidgets('movie detail hero card invokes play callback from center icon', (
+    WidgetTester tester,
+  ) async {
+    var tapped = false;
+
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [sessionStoreProvider.overrideWithValue(sessionStore)],
+        child: MaterialApp(
+          theme: sakuraThemeData,
+          home: Scaffold(
+            body: SizedBox(
+              width: 1200,
+              child: MovieDetailHeroCard(
+                height: 420,
+                mainImageKey: 'cover',
+                mainImageUrl: '/covers/main.jpg',
+                heat: 24,
+                canPlay: true,
+                isSubscribed: false,
+                isCollection: false,
+                onPlayTap: () {
+                  tapped = true;
+                },
+                onSubscriptionTap: null,
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+
+    await tester.tap(find.byKey(const Key('movie-detail-hero-play-button')));
+    await tester.pump();
+
+    expect(tapped, isTrue);
+  });
+
+  testWidgets('movie detail hero card uses global hero play icon token', (
+    WidgetTester tester,
+  ) async {
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [sessionStoreProvider.overrideWithValue(sessionStore)],
+        child: MaterialApp(
+          theme: sakuraThemeData,
+          home: Scaffold(
+            body: SizedBox(
+              width: 1200,
+              child: MovieDetailHeroCard(
+                height: 420,
+                mainImageKey: 'cover',
+                mainImageUrl: '/covers/main.jpg',
+                heat: 24,
+                canPlay: true,
+                isSubscribed: false,
+                isCollection: false,
+                onPlayTap: () {},
+                onSubscriptionTap: null,
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+
+    final icon = tester.widget<Icon>(find.byIcon(Icons.play_arrow_rounded));
+    expect(icon.size, AppComponentTokens.defaults().iconSize4xl);
+  });
+
+  testWidgets(
+    'movie detail hero card hides center play icon when unavailable',
+    (WidgetTester tester) async {
+      await tester.pumpWidget(_buildApp(sessionStore: sessionStore));
+
+      expect(
+        find.byKey(const Key('movie-detail-hero-play-button')),
+        findsNothing,
+      );
+      expect(find.byIcon(Icons.play_arrow_rounded), findsNothing);
+    },
+  );
+
+  testWidgets('movie detail hero card shows heat badge in top right', (
+    WidgetTester tester,
+  ) async {
+    await tester.pumpWidget(_buildApp(sessionStore: sessionStore));
+
+    expect(
+      find.byKey(const Key('movie-detail-hero-heat-badge')),
+      findsOneWidget,
+    );
+    expect(
+      find.byKey(const Key('movie-detail-hero-subscription-icon')),
+      findsOneWidget,
+    );
+    expect(
+      find.byKey(const Key('movie-detail-hero-more-actions-button')),
+      findsOneWidget,
+    );
+    expect(
+      find.byKey(const Key('movie-detail-hero-heat-text')),
+      findsOneWidget,
+    );
+    expect(find.text('24'), findsOneWidget);
+
+    final heroRect = tester.getRect(find.byType(MovieDetailHeroCard));
+    final heatRect = tester.getRect(
+      find.byKey(const Key('movie-detail-hero-heat-badge')),
+    );
+    final moreRect = tester.getRect(
+      find.byKey(const Key('movie-detail-hero-more-actions-button')),
+    );
+    final subscriptionRect = tester.getRect(
+      find.byKey(const Key('movie-detail-hero-subscription-icon')),
+    );
+    final edgeInset = AppSpacing.defaults().sm;
+
+    expect(heatRect.top - heroRect.top, closeTo(edgeInset, 1.0));
+    expect(moreRect.top - heroRect.top, closeTo(edgeInset, 1.0));
+    expect(heroRect.right - moreRect.right, closeTo(edgeInset, 0.1));
+    expect(heatRect.right, lessThan(moreRect.left));
+    expect(subscriptionRect.top - heroRect.top, closeTo(edgeInset, 0.1));
+    expect(subscriptionRect.left - heroRect.left, closeTo(edgeInset, 0.1));
+
+    final icon = tester.widget<Icon>(
+      find.byIcon(Icons.local_fire_department_rounded),
+    );
+    expect(icon.color, AppColors.defaults().movieDetailHeatIcon);
+
+    final badge = tester.widget<Container>(
+      find.byKey(const Key('movie-detail-hero-heat-badge')),
+    );
+    final decoration = badge.decoration as BoxDecoration;
+    expect(decoration.color, AppColors.defaults().mediaOverlayStrong);
+  });
+
+  testWidgets(
+    'movie detail hero card shows placeholder when main image is absent',
+    (WidgetTester tester) async {
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [sessionStoreProvider.overrideWithValue(sessionStore)],
+          child: MaterialApp(
+            theme: sakuraThemeData,
+            home: Scaffold(
+              body: SizedBox(
+                width: 1200,
+                child: MovieDetailHeroCard(
+                  height: 420,
+                  mainImageKey: 'placeholder',
+                  mainImageUrl: null,
+                  heat: 24,
+                  canPlay: false,
+                  isSubscribed: false,
+                  isCollection: false,
+                  onPlayTap: null,
+                  onSubscriptionTap: null,
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
+
+      expect(
+        find.byKey(const Key('movie-detail-main-image-placeholder')),
+        findsOneWidget,
+      );
+      expect(find.byType(MaskedImage), findsNothing);
+      expect(find.byIcon(Icons.image_outlined), findsOneWidget);
+    },
+  );
+
+  testWidgets('movie detail hero card invokes more actions callback', (
+    WidgetTester tester,
+  ) async {
+    Offset? tappedPosition;
+
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [sessionStoreProvider.overrideWithValue(sessionStore)],
+        child: MaterialApp(
+          theme: sakuraThemeData,
+          home: Scaffold(
+            body: SizedBox(
+              width: 1200,
+              child: MovieDetailHeroCard(
+                height: 420,
+                mainImageKey: 'cover',
+                mainImageUrl: '/covers/main.jpg',
+                heat: 24,
+                canPlay: true,
+                isSubscribed: false,
+                isCollection: false,
+                onPlayTap: null,
+                onSubscriptionTap: null,
+                onMoreActionsTap: (globalPosition) async {
+                  tappedPosition = globalPosition;
+                },
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+
+    await tester.tap(
+      find.byKey(const Key('movie-detail-hero-more-actions-button')),
+    );
+    await tester.pump();
+
+    expect(tappedPosition, isNotNull);
+  });
+}
+
+Widget _buildApp({required SessionStore sessionStore}) {
+  return ProviderScope(
+    overrides: [sessionStoreProvider.overrideWithValue(sessionStore)],
+    child: MaterialApp(
+      theme: sakuraThemeData,
+      home: Scaffold(
+        body: SizedBox(
+          width: 1200,
+          child: MovieDetailHeroCard(
+            height: 420,
+            mainImageKey: 'cover',
+            mainImageUrl: '/covers/main.jpg',
+            heat: 24,
+            canPlay: true,
+            isSubscribed: false,
+            isCollection: false,
+            onPlayTap: null,
+            onSubscriptionTap: null,
+          ),
+        ),
+      ),
+    ),
+  );
+}
