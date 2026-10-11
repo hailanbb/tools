@@ -175,6 +175,27 @@
       "imported_at": "2026-10-11T21:12:00+08:00",
       "checked_at": "2026-10-11T21:12:00+08:00",
       "verification": "文档与源码核验；未编译、未在 Windows 实机运行"
+    },
+    "https://github.com/tntcrafthim/piik": {
+      "tool_name": "piik",
+      "display_name": "Piik · 私密屏幕共享与协同观影",
+      "category": "媒体处理",
+      "summary": "免费开源的私密屏幕共享与同屏观影工具，支持多端浏览器免安装观看、P2P直连与SFU自建中继",
+      "scenario": "朋友间私密游戏直播、一起看电影、桌面/画作演示、自建低延迟局域网或公网同屏小剧场",
+      "platforms": [
+        "Windows",
+        "macOS",
+        "Linux",
+        "Web",
+        "Docker"
+      ],
+      "mode": "snapshot",
+      "ref": "v1.9.2",
+      "commit": "390e637d4e9090e6258ccc3d3a0a3f877d81b25c",
+      "license": "MIT",
+      "imported_at": "2026-10-11T21:20:00+08:00",
+      "checked_at": "2026-10-11T21:20:00+08:00",
+      "verification": "文档与源码核验；未部署服务端实测、未启动桌面 App 捕获"
     }
   }
 }
