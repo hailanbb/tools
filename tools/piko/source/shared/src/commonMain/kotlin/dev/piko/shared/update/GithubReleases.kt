@@ -1,0 +1,347 @@
+package dev.piko.shared.update
+
+import dev.piko.shared.log.PikoLog
+import io.ktor.client.HttpClient
+import io.ktor.client.request.get
+import io.ktor.client.request.header
+import io.ktor.client.request.prepareGet
+import io.ktor.client.statement.bodyAsChannel
+import io.ktor.client.statement.bodyAsText
+import io.ktor.http.HttpStatusCode
+import io.ktor.http.isSuccess
+import io.ktor.utils.io.readAvailable
+import kotlinx.coroutines.CancellationException
+import kotlinx.io.IOException
+import kotlinx.serialization.SerialName
+import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.Json
+
+/** Release 的一个附件。[sha256] 取自 GitHub 为每个附件算好的 digest（小写十六进制）。 */
+data class ReleaseAsset(
+    val name: String,
+    val url: String,
+    val size: Long,
+    val sha256: String?,
+) {
+    /**
+     * 依次尝试的下载地址：GitHub 本身，再是代理它的 ghfast.top。github.com 在国内时通时不通，下安装包
+     * 动辄一百多 MB，直连不上就换一条。镜像给的内容不可信也无妨：下完按 [sha256] 校验，不符即丢弃。
+     */
+    val urls: List<String>
+        get() = listOf(url) + listOfNotNull(url.takeIf { it.startsWith(GITHUB_PREFIX) }?.let { GHFAST_PREFIX + it })
+}
+
+private const val TAG = "Update"
+private const val GITHUB_PREFIX = "https://github.com/"
+private const val GHFAST_PREFIX = "https://ghfast.top/"
+
+data class LatestRelease(
+    val version: String,
+    val notes: String,
+    val pageUrl: String,
+    val assets: List<ReleaseAsset>,
+) {
+    fun asset(name: String): ReleaseAsset? = assets.firstOrNull { it.name == name }
+}
+
+sealed interface ReleaseCheck {
+    data class Newer(val release: LatestRelease) : ReleaseCheck
+    data object UpToDate : ReleaseCheck
+    data class Failed(val cause: Throwable) : ReleaseCheck
+}
+
+/** 下载内容与 Release 公布的摘要或清单不符。 */
+class ChecksumMismatchException(message: String) : Exception(message)
+
+/** 网络不通时用户该先换个网，其余原因只能稍后再试，界面按这两类措辞。 */
+fun Throwable.isNetworkFailure(): Boolean = this is IOException
+
+/**
+ * 从 GitHub Releases 取最新版本并下载附件。两端共用；选哪个附件、怎么安装归各平台。
+ *
+ * 最新版本按 [latestReleaseUrls] 的先后取，前一个失败才试下一个，见 [LATEST_RELEASE_SOURCES]。
+ * 可换，是为了在本机用假的 Release 端到端地走一遍更新流程。
+ */
+class GithubReleaseClient(
+    private val http: HttpClient,
+    private val userAgent: String,
+    private val latestReleaseUrls: List<String> = LATEST_RELEASE_SOURCES,
+) {
+    private val json = Json { ignoreUnknownKeys = true }
+
+    suspend fun check(currentVersion: String): ReleaseCheck = try {
+        val release = fetchLatest()
+        when {
+            release == null -> ReleaseCheck.UpToDate
+            isNewerVersion(release.version, currentVersion) -> ReleaseCheck.Newer(release)
+            else -> ReleaseCheck.UpToDate
+        }
+    } catch (e: CancellationException) {
+        throw e
+    } catch (e: Throwable) {
+        ReleaseCheck.Failed(e)
+    }
+
+    /** 逐个来源地取，都失败时抛最后一个的异常，前面的挂在 suppressed 上，日志里看得到每一处为什么失败。 */
+    private suspend fun fetchLatest(): LatestRelease? {
+        var failure: Throwable? = null
+        for ((index, url) in latestReleaseUrls.withIndex()) {
+            try {
+                return fetchLatest(url).also { if (index > 0) PikoLog.i(TAG, "取最新版本：前 $index 个来源失败，第 ${index + 1} 个取到") }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Throwable) {
+                PikoLog.d(TAG, "取最新版本：第 ${index + 1} 个来源失败，${e::class.simpleName}：${e.message}")
+                failure = e.also { current -> failure?.let(current::addSuppressed) }
+            }
+        }
+        throw checkNotNull(failure) { "没有可用的 Release 来源" }
+    }
+
+    /** 草稿与预发布不算新版本，返回 null。releases/latest 本身已排除这两类，这里再防一道。 */
+    private suspend fun fetchLatest(url: String): LatestRelease? {
+        val response = http.get(url) {
+            // GitHub 不带 UA 返回 403
+            header("Accept", "application/vnd.github+json")
+            header("User-Agent", userAgent)
+        }
+        check(response.status.isSuccess()) { "HTTP ${response.status.value} ($url)" }
+        val release = json.decodeFromString(ReleaseDto.serializer(), response.bodyAsText())
+        if (release.draft || release.prerelease) return null
+        val version = release.tagName.removePrefix("v")
+        check(version.isNotEmpty()) { "Release 没有 tag" }
+        return LatestRelease(
+            version = version,
+            notes = updateNotesOf(release.body.orEmpty()),
+            pageUrl = release.htmlUrl,
+            assets = release.assets.map { asset ->
+                ReleaseAsset(
+                    name = asset.name,
+                    url = asset.downloadUrl,
+                    size = asset.size,
+                    sha256 = asset.digest?.takeIf { it.startsWith(SHA256_PREFIX) }?.removePrefix(SHA256_PREFIX)?.lowercase(),
+                )
+            },
+        )
+    }
+
+    /**
+     * 边下边交给 [onChunk]：写文件与算摘要由调用方做，这里只管流与进度。
+     * [onProgress] 每涨 1% 才回调一次，按块回调的话几十 MB 的包要触发几百次重组。
+     *
+     * 按 [ReleaseAsset.urls] 依次试，只在一个字节都还没交出去时换下一个：已经交给 [onChunk] 的字节收不回来，
+     * 中途断了就照常失败，由用户重试。
+     */
+    suspend fun download(
+        asset: ReleaseAsset,
+        onChunk: (buffer: ByteArray, length: Int) -> Unit,
+        onProgress: (Float) -> Unit,
+    ) {
+        var failure: Throwable? = null
+        for ((index, url) in asset.urls.withIndex()) {
+            var written = 0L
+            if (index > 0) PikoLog.i(TAG, "下载更新：第 $index 个地址未取到，换第 ${index + 1} 个")
+            try {
+                http.prepareGet(url) { header("User-Agent", userAgent) }.execute { response ->
+                    check(response.status.isSuccess()) { "HTTP ${response.status.value} ($url)" }
+                    val channel = response.bodyAsChannel()
+                    val buffer = ByteArray(64 * 1024)
+                    var reported = 0f
+                    while (true) {
+                        val read = channel.readAvailable(buffer)
+                        if (read < 0) break
+                        if (read == 0) continue
+                        onChunk(buffer, read)
+                        written += read
+                        val progress = if (asset.size > 0) (written.toFloat() / asset.size).coerceIn(0f, 1f) else 0f
+                        if (progress - reported >= 0.01f) {
+                            reported = progress
+                            onProgress(progress)
+                        }
+                    }
+                    check(asset.size <= 0 || written == asset.size) { "下载不完整：$written / ${asset.size}" }
+                }
+                return
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Throwable) {
+                if (written > 0) throw e
+                failure = e.also { current -> failure?.let(current::addSuppressed) }
+            }
+        }
+        throw checkNotNull(failure) { "${asset.name} 没有下载地址" }
+    }
+
+    /**
+     * 只下附件的一段，[range] 为闭区间。Linux 的 zsync 差分更新用它取新 AppImage 里本机没有的块。
+     * 换地址的规则同 [download]。服务器不认 Range、回的是整个文件（200）或别的区间时算失败，换下一个地址：
+     * 照单全收会把整包写进这一段的位置。
+     */
+    suspend fun downloadRange(
+        asset: ReleaseAsset,
+        range: LongRange,
+        onChunk: (buffer: ByteArray, length: Int) -> Unit,
+    ) {
+        val expected = range.last - range.first + 1
+        var failure: Throwable? = null
+        for (url in asset.urls) {
+            var written = 0L
+            try {
+                http.prepareGet(url) {
+                    header("User-Agent", userAgent)
+                    header("Range", "bytes=${range.first}-${range.last}")
+                }.execute { response ->
+                    check(response.status == HttpStatusCode.PartialContent) { "HTTP ${response.status.value}，不是分段响应 ($url)" }
+                    val contentRange = response.headers["Content-Range"].orEmpty()
+                    check(contentRange.startsWith("bytes ${range.first}-${range.last}/")) { "分段响应的区间不符：$contentRange ($url)" }
+                    val channel = response.bodyAsChannel()
+                    val buffer = ByteArray(64 * 1024)
+                    while (true) {
+                        val read = channel.readAvailable(buffer)
+                        if (read < 0) break
+                        if (read == 0) continue
+                        check(written + read <= expected) { "分段响应超出区间 ($url)" }
+                        onChunk(buffer, read)
+                        written += read
+                    }
+                    check(written == expected) { "分段下载不完整：$written / $expected" }
+                }
+                return
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Throwable) {
+                if (written > 0) throw e
+                failure = e.also { current -> failure?.let(current::addSuppressed) }
+            }
+        }
+        throw checkNotNull(failure) { "${asset.name} 没有下载地址" }
+    }
+
+    companion object {
+        /**
+         * 取最新版本的来源，依次尝试：
+         * 1. GitHub API。附件带 digest，正文里有更新日志。匿名调用按出口 IP 每小时 60 次，走代理的用户
+         *    共用出口，常被限流回 403。
+         * 2. 最新 Release 的附件 release.json（release.yml 生成，与 API 同一个形状）。经 github.com 的下载地址取，
+         *    不走 API，不限流；releases/latest 只指向已公开的版本，草稿看不到。它在构建时生成，那时更新日志
+         *    还没写，所以这条路拿到的正文是空的，弹窗只给更新页链接。
+         * 版本信息只取自 GitHub 本身，不经镜像：附件的摘要就写在这份信息里，镜像若给一份伪造的版本连同
+         * 伪造附件的摘要，下载后的校验照样通过。镜像只用来下附件（[ReleaseAsset.urls]），附件仍按这里
+         * 取到的摘要校验，镜像改不了它。
+         * jsDelivr 不在其中：它按 tag 取仓库文件，tag 推上去时 Release 还是草稿，会把没公开的版本提前告诉用户；
+         * 它也取不到 Release 附件。
+         */
+        val LATEST_RELEASE_SOURCES = listOf(
+            "https://api.github.com/repos/NihilDigit/piko/releases/latest",
+            "${GITHUB_PREFIX}NihilDigit/piko/releases/latest/download/$RELEASE_MANIFEST",
+        )
+
+        /** release.yml 为每个版本附上的 Release 信息，与 GitHub API 的 releases/latest 同形。 */
+        const val RELEASE_MANIFEST = "release.json"
+        private const val SHA256_PREFIX = "sha256:"
+    }
+}
+
+/**
+ * Release 正文里给更新弹窗看的部分：第一个「## 下载」标题之前的更新内容，仍是 Markdown。
+ *
+ * 正文由 .github/release-notes.md 生成，其后是给下载页读者的附件说明与校验方法，已装好的用户
+ * 用不上，其中的表格在弹窗里也排不开。标题改动时两边要一起改。
+ */
+fun updateNotesOf(body: String): String =
+    body.lineSequence()
+        .map { it.trimEnd() }
+        .takeWhile { it.trim() != DOWNLOAD_SECTION_HEADING }
+        .joinToString("\n")
+        .trim()
+
+const val DOWNLOAD_SECTION_HEADING = "## 下载"
+
+/** 更新说明的一段。文字里仍保留行内标记（粗体、行内代码、链接），由界面排版。 */
+sealed interface ReleaseNoteBlock {
+    val text: String
+
+    data class Heading(override val text: String) : ReleaseNoteBlock
+
+    data class Bullet(override val text: String) : ReleaseNoteBlock
+
+    data class Paragraph(override val text: String) : ReleaseNoteBlock
+}
+
+/**
+ * 按更新日志的写法切成标题、列表项与段落：一行概述，「## 修复」「## 变化」两节，每条一个短横线。
+ * 只认这几种块，不是完整的 Markdown 解析；列表项折行接到上一项，段落内的换行并成一段。
+ */
+fun releaseNoteBlocks(markdown: String): List<ReleaseNoteBlock> {
+    val blocks = mutableListOf<ReleaseNoteBlock>()
+    var open: ReleaseNoteBlock? = null
+    fun close() {
+        open?.let(blocks::add)
+        open = null
+    }
+    for (line in markdown.lineSequence()) {
+        val heading = MARKDOWN_HEADING.matchEntire(line)
+        val bullet = MARKDOWN_BULLET.find(line)
+        when {
+            line.isBlank() -> close()
+            heading != null -> {
+                close()
+                blocks += ReleaseNoteBlock.Heading(heading.groupValues[1])
+            }
+            bullet != null -> {
+                close()
+                open = ReleaseNoteBlock.Bullet(line.substring(bullet.range.last + 1).trim())
+            }
+            else -> open = when (val current = open) {
+                is ReleaseNoteBlock.Bullet -> current.copy(text = joinWrapped(current.text, line.trim()))
+                is ReleaseNoteBlock.Paragraph -> current.copy(text = joinWrapped(current.text, line.trim()))
+                else -> ReleaseNoteBlock.Paragraph(line.trim())
+            }
+        }
+    }
+    close()
+    return blocks
+}
+
+private val MARKDOWN_HEADING = Regex("""\s{0,3}#{1,6}\s+(.*?)(?:\s+#+)?\s*""")
+private val MARKDOWN_BULLET = Regex("""^\s*[-*+]\s+""")
+
+/**
+ * 按数字逐段比较，忽略 -debug 这类后缀；段数不同时缺的一段按 0 计。
+ * 不是数字的版本（桌面端开发时显示的「开发版」）按 0 计，任何正式版本都比它新。
+ */
+fun isNewerVersion(candidate: String, current: String): Boolean {
+    fun parts(v: String) = v.substringBefore('-').split('.').map { it.toIntOrNull() ?: 0 }
+    val a = parts(candidate)
+    val b = parts(current)
+    for (i in 0 until maxOf(a.size, b.size)) {
+        val x = a.getOrElse(i) { 0 }
+        val y = b.getOrElse(i) { 0 }
+        if (x != y) return x > y
+    }
+    return false
+}
+
+@Serializable
+private data class ReleaseDto(
+    @SerialName("tag_name") val tagName: String = "",
+    @SerialName("html_url") val htmlUrl: String = "",
+    val body: String? = null,
+    val draft: Boolean = false,
+    val prerelease: Boolean = false,
+    val assets: List<AssetDto> = emptyList(),
+)
+
+@Serializable
+private data class AssetDto(
+    val name: String,
+    val size: Long = 0L,
+    @SerialName("browser_download_url") val downloadUrl: String,
+    val digest: String? = null,
+)
+
+/** 折行接回一行：中文之间直接相连，西文单词之间补回被换行吃掉的空格。 */
+private fun joinWrapped(before: String, after: String): String {
+    val needsSpace = before.lastOrNull()?.let { it.code < 0x80 } == true && after.firstOrNull()?.let { it.code < 0x80 } == true
+    return if (needsSpace) "$before $after" else before + after
+}

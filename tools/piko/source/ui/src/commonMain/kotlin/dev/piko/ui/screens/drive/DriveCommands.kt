@@ -1,0 +1,158 @@
+package dev.piko.ui.screens.drive
+
+import dev.piko.shared.data.isArchiveVolume
+import dev.piko.shared.data.isExtractableArchive
+import dev.piko.shared.data.isVaulted
+import dev.piko.shared.upload.isUploading
+import io.github.nihildigit.pikpak.FileStat
+
+/*
+ * 宽窗口网盘页命令栏的显隐规则，以及条目操作做不做得了（[itemCommands]）。命令栏上的每一样东西都要在眼下真有意义：
+ * 做不了的不摆，别处已经摆着的不重复。规则只写在这里，命令栏照 [DriveCommands] 画，不再在各处零散地判断。
+ *
+ * 命令栏只放作用于当前位置的命令，不放作用于条目的操作，点中一项与多选都是：条目操作经右键菜单（桌面触屏与笔是长按）
+ * 与快捷键。多选时在任一选中项上右键，菜单作用于全部选中的，命令栏再摆一份只是重复，还把位置命令挤进「更多」。
+ * 所以 [CommandInputs] 里没有作用于哪几项，[DriveCommands] 里也没有条目操作。
+ *
+ * 眼下的状态由两样东西决定，全在 [CommandInputs] 里：
+ * - 在哪（[CommandPlace]）：网盘根目录、文件夹、搜索结果、星标这类库、最近添加与播放历史、回收站、压缩包里。
+ * - 剪贴板里有没有东西，眼前的列表有几项、有几类，是否在多选里。
+ */
+
+/** 眼前在哪。库里的子文件夹是真的文件夹，算 [FOLDER]。 */
+internal enum class CommandPlace {
+    ROOT,
+    FOLDER,
+
+    /** 目录内过滤或全盘搜索的结果：不是一个目录，往里新建、粘贴、查重都说不清落在哪。 */
+    SEARCH,
+
+    /** 星标：条目是散在全盘的真文件，能改能移，只是这里不是一个能往里放东西的目录。 */
+    LIBRARY,
+
+    /** 最近添加：同 [LIBRARY]，多一个移除记录。 */
+    RECENT,
+
+    /** 播放历史：同 [RECENT]，另能整个清空。最近添加没有清空，两者因此分开。 */
+    HISTORY,
+
+    /** 回收站：只能恢复与彻底删除。 */
+    TRASH,
+
+    /** 压缩包里（见 ArchiveLocation）：条目不在网盘里，只能打开、下载文件与解压选中的几项。 */
+    ARCHIVE,
+}
+
+internal class CommandInputs(
+    val place: CommandPlace,
+    /** 人在网盘根目录上（路径栈只有根）。 */
+    val atRoot: Boolean,
+    /** 在多选中（有选中的项）。 */
+    val selecting: Boolean,
+    val clipboardFull: Boolean,
+    /** 眼前列表里的条目数。 */
+    val itemCount: Int,
+    /** 列表里的条目已经全选上了。 */
+    val allSelected: Boolean,
+    /** 列表里有几类文件，以及是否正按类型筛着。 */
+    val typeCount: Int,
+    val filtering: Boolean,
+    /** 平台放得了信息流的片段。 */
+    val feedSupported: Boolean,
+    /** 设置里的文件名解析总开关，番号识别跟着它。 */
+    val nameParsing: Boolean,
+)
+
+/**
+ * 命令栏上每一样东西显不显示。窄窗口的 FAB 菜单照其中的新建与添加链接，只管往这里加东西；
+ * 查找重复与按番号规范命名在列表页眉的菜单里。
+ */
+internal data class DriveCommands(
+    val home: Boolean,
+    /** 「新建」菜单：新建文件夹、上传。 */
+    val create: Boolean,
+    val paste: Boolean,
+    /** 清空回收站、清空播放历史。是这一页的主操作，不在「更多」里，见 PrimaryActionButton。 */
+    val emptyPlace: Boolean,
+    val selectAll: Boolean,
+    val findDuplicates: Boolean,
+    /** 按番号规范命名当前文件夹。桌面在命令栏查找重复旁边，移动端在列表页眉的 ⋮ 里，同一个条件。 */
+    val canonicalNaming: Boolean,
+    val sort: Boolean,
+    val filter: Boolean,
+    val feed: Boolean,
+    val addLink: Boolean,
+)
+
+/**
+ * 作用于几项条目的操作做不做得了。右键菜单、操作面板与移动端多选顶栏都照它，同一个操作在各处出现的条件一致；
+ * 某类条目自己多出的操作（视频的外部播放器、文件夹的查重）不在这里，由 fileActions 按类型加。
+ */
+internal class ItemCommands(
+    val cutCopy: Boolean,
+    val rename: Boolean,
+    val share: Boolean,
+    val moveToTrash: Boolean,
+    /** 回收站的恢复与彻底删除，取代上面那一组。 */
+    val restoreOrDelete: Boolean,
+    val moveCopyTo: Boolean,
+    val download: Boolean,
+    val extract: Boolean,
+    val removeRecord: Boolean,
+    /** 归档，文件夹另有取消归档。 */
+    val vault: Boolean,
+)
+
+internal fun itemCommands(place: CommandPlace, targets: List<FileStat>): ItemCommands {
+    val inTrash = place == CommandPlace.TRASH
+    val inArchive = place == CommandPlace.ARCHIVE
+    val eventLog = place == CommandPlace.RECENT || place == CommandPlace.HISTORY
+    val hasTargets = targets.isNotEmpty()
+    // 上传中的文件改名、移动、分享都会失败，作用对象里有它就不给这几样；归档条目与压缩包里的条目在网盘里没有文件，同理
+    val settled = hasTargets && !inArchive && targets.none { it.isUploading || it.isVaulted }
+    return ItemCommands(
+        cutCopy = settled && !inTrash,
+        rename = settled && !inTrash,
+        share = settled && !inTrash,
+        moveToTrash = hasTargets && !inTrash && !inArchive,
+        restoreOrDelete = hasTargets && inTrash,
+        moveCopyTo = settled && !inTrash,
+        // 文件夹整个下载，见 PikoDownloadCoordinator.enqueueFolders；压缩包里的文件夹不在网盘里，列不出内容，只下文件
+        download = hasTargets && !inTrash && targets.any { !it.isUploading && !(inArchive && it.isFolder) },
+        // 压缩包里解压的是选中的几项本身，不是选中项里的压缩包
+        extract = hasTargets && !inTrash && (inArchive || targets.any { it.isExtractableArchive || it.isArchiveVolume }),
+        removeRecord = hasTargets && eventLog,
+        // 回收站与压缩包里的不在网盘里。库（星标、最近添加、播放历史、查重的结果）里要做的是回到原处、下载、移走或删除，
+        // 不给：移动端面板在最近添加里已满 8 行，见 MobilePanelSizeTest。搜索结果的条目仍在各自的文件夹里，清单按所在文件夹写，照常给
+        vault =settled && (place == CommandPlace.ROOT || place == CommandPlace.FOLDER || place == CommandPlace.SEARCH),
+    )
+}
+
+internal fun driveCommands(input: CommandInputs): DriveCommands = with(input) {
+    val folder = place == CommandPlace.ROOT || place == CommandPlace.FOLDER
+    val inTrash = place == CommandPlace.TRASH
+    DriveCommands(
+        home = !atRoot,
+        // 多选时左端换成「已选 N 项」；搜索结果不是目录
+        create = folder && !selecting,
+        paste = clipboardFull && folder,
+        // 清空只在有东西可清时。与 libraryPageActions 对应：只有回收站与播放历史有清空
+        emptyPlace = (inTrash || place == CommandPlace.HISTORY) && itemCount > 0,
+        // 只在多选里：没进多选时它是一个随时摆着、用不上的按钮；平时全选靠主修饰键+A 与空白处右键
+        selectAll = selecting && itemCount > 0 && !allSelected,
+        // 查重的范围是眼前这个目录，搜索结果与库都不是目录
+        findDuplicates = folder && itemCount > 0,
+        // 范围同查重；关了文件名解析就认不出番号，扫出来必然是空的
+        canonicalNaming = folder && itemCount > 0 && nameParsing,
+        // 库里按各自的先后（添加、播放的时间）排；一项以下没得排
+        sort = (folder || place == CommandPlace.SEARCH) && itemCount >= 2,
+        // 只有一类时筛了等于没筛；筛着的时候要留着，才撤得掉
+        filter = typeCount >= 2 || filtering,
+        // 信息流刷的是一个文件夹
+        feed = feedSupported && folder,
+        // 默认存进眼前的目录（InstantSheetState.followDriveFolder）。库、查重、压缩包的栈顶是 piko: 一类的虚拟 ID，
+        // 存不进去，会退到 My Packs 并提示「当前目录已不存在」。搜索时栈顶仍是搜索所在的目录，地址栏也还写着它，
+        // 照常给；否则一输入搜索词命令栏右端就跳
+        addLink = folder || place == CommandPlace.SEARCH,
+    )
+}

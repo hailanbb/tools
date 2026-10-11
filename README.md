@@ -10,7 +10,7 @@
 
 <!-- catalog:start -->
 
-已收藏 **10** 个工具。版本为收录时快照，实际使用请查看官方发行页。
+已收藏 **11** 个工具。版本为收录时快照，实际使用请查看官方发行页。
 
 | 分类 | 工具 | 核心功能 | 使用场景 | 平台 | 收藏版本 | 详细说明 |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
@@ -23,6 +23,7 @@
 | 媒体处理 | 微信视频号下载器 | 通过本地代理为视频号页面提供下载入口 | 保存本人或获授权的视频素材 | Windows / macOS / Linux | v260907 | [👉 使用指南](tools/wx-channels-download/README.md) |
 | 教育学习 | OpenMAIC · 多智能体互动课堂 | 面向沉浸式学习的多智能体互动课堂平台，一键将任意主题或文档转化为交互式课程与仿真实验 | 课程教学设计、交互式自学体验、多智能体协同授课与实验推演 | Windows / macOS / Linux / Docker | v1.0.3 | [👉 使用指南](tools/openmaic/README.md) |
 | 文件传输 | LocalSend · 局域网互传 | 电脑与手机在局域网内互传文件和文字 | 跨系统传照片、文档；无外网时交换资料 | Windows / macOS / Linux / Android / iOS / Fire OS | v1.18.2 | [👉 使用指南](tools/localsend/README.md) |
+| 文件传输 | Piko · 高性能多平台 PikPak 客户端 | 高性能、多平台的第三方 PikPak 网盘客户端，支持磁力解析、多并发传输、信息流快速预览与全端自适应 | PikPak 网盘高速下载与资源管理、磁力链接快速保存预览、多平台（Win/Mac/Linux/Android）离线与在线观影 | Windows / macOS / Linux / Android | v1.2.0 | [👉 使用指南](tools/piko/README.md) |
 | 文档转换 | MarkItDown · 文档转 Markdown | 将 PDF、Office、HTML 等内容转换为 Markdown | 知识库入库、文档检索与大模型文本预处理 | Windows / macOS / Linux | v0.1.7 | [👉 使用指南](tools/markitdown/README.md) |
 
 <!-- catalog:end -->
@@ -39,6 +40,7 @@
 - **NAS 私人媒体库与多端观影** → [SakuraMedia 使用指南](tools/sakuramedia/README.md)：面向 NAS 用户的一站式影视媒体库，支持自动入库、指纹排重、缩略图时间轴与网盘挂载。
 - **经典千千静听与本地无损音乐** → [TTPlayer 使用指南](tools/ttplayer/README.md)：千千静听社区现代复刻版，支持动感歌词、Winamp 皮肤、SMTC 媒体控件与独立进程插件沙盒。
 - **私密屏幕共享与同屏看片** → [Piik 使用指南](tools/piik/README.md)：免费开源的私密屏幕共享工具，优先 P2P 直连、浏览器免安装加入与自建站 SFU 自动中继。
+- **PikPak 网盘极速下载与多端观影** → [Piko 使用指南](tools/piko/README.md)：高性能多平台 PikPak 客户端，支持磁力解析、多并发传输、信息流快速预览与全端自适应。
 - 更多类别随实际收藏增加，不设置空目录，也不把安装工具的流程套成 Agent 技能调用。
 
 <a id="structure"></a>
@@ -62,7 +64,8 @@ tools/
 │   ├── openmaic/                 # 多智能体互动课堂，相同条目结构
 │   ├── sakuramedia/              # 私人媒体库管理平台，相同条目结构
 │   ├── ttplayer/                 # 千千静听社区复刻版，相同条目结构
-│   └── piik/                     # 私密屏幕共享与协同观影，相同条目结构
+│   ├── piik/                     # 私密屏幕共享与协同观影，相同条目结构
+│   └── piko/                     # 高性能多平台 PikPak 客户端，相同条目结构
 ├── imported_sources.json         # 来源与版本清单，避免重复收藏
 ├── docs/collection-policy.md      # 收录与维护约定
 └── scripts/                      # 本仓库的索引维护脚本

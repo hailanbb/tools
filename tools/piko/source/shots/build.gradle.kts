@@ -1,0 +1,87 @@
+// 开发用的截图工具：拿假的 PikPak 服务端与真实的界面、状态与平台实现，无头渲染桌面端任意窗口尺寸、
+// 深浅主题下的页面，存成 PNG。改布局后对照看，不必开真实账号。不随应用发布。
+// ./gradlew :shots:run --args="all" 出一整套；用法见 src/main/kotlin/dev/piko/shots/Main.kt
+plugins {
+    id("org.jetbrains.kotlin.jvm")
+    alias(libs.plugins.kotlin.compose)
+    alias(libs.plugins.kotlin.serialization)
+    application
+}
+
+kotlin {
+    // desktopApp 以 25 编译（FFM），这里要读它的类
+    jvmToolchain(25)
+}
+
+// Skia 的原生库按宿主取。与 desktopApp 不同，这里也要能在 Linux 上跑：没有显示器的机器（CI、云端容器）
+// 正是最需要看截图的地方
+val hostOs = System.getProperty("os.name").let {
+    when {
+        it.startsWith("Mac") -> "macos"
+        it.startsWith("Windows") -> "windows"
+        else -> "linux"
+    }
+}
+val hostArch = if (System.getProperty("os.arch") == "aarch64") "arm64" else "x64"
+
+application {
+    applicationName = "piko-shots"
+    mainClass = "dev.piko.shots.MainKt"
+    // 无头渲染；已下载文件的缩略图由 Coil 解码，默认堆太小
+    applicationDefaultJvmArgs = listOf("-Djava.awt.headless=true", "-Xmx1g", "--enable-native-access=ALL-UNNAMED")
+}
+
+dependencies {
+    implementation(project(":desktopApp"))
+    implementation(project(":ui"))
+    implementation(project(":shared"))
+    implementation("org.jetbrains.compose.desktop:desktop-jvm-$hostOs-$hostArch:${libs.versions.composeMultiplatform.get()}")
+    implementation(libs.kotlinx.coroutines.core)
+    implementation(libs.cmp.material.icons.extended)
+    implementation(libs.kotlinx.serialization.json)
+    implementation(libs.ktor.client.okhttp)
+    // 片段面板与信息流建预览播放器时要 mpv 的原生库；没有它组合当场抛异常。理由同 desktopApp 的 desktopTest
+    runtimeOnly("org.openani.mediamp:mediamp-mpv-runtime-$hostOs-$hostArch:${libs.versions.mediamp.get()}")
+}
+
+// Gradle 跑在 JDK 21 上时 run 默认也用它，加载 25 编出的类即失败；理由同 desktopApp 的 run
+tasks.named<JavaExec>("run") {
+    javaLauncher = javaToolchains.launcherFor { languageVersion = JavaLanguageVersion.of(25) }
+    // 相对路径的输出目录落在仓库根下的 build/shots，与从哪个目录调用 Gradle 无关
+    workingDir = rootProject.projectDir
+}
+
+// 同 :cli：runtime-desktop 是转发到 androidx 的空壳，与真正的 jar 同名，installDist 往 lib/ 里拷时撞名
+configurations.runtimeClasspath {
+    exclude(group = "org.jetbrains.compose.runtime", module = "runtime-desktop")
+}
+
+// runtime-saveable-desktop 同样是转发到 androidx 的同名空壳。装出来的副本供跑整套用：gradle run 直接读各模块的
+// build/classes，跑的半小时里别处重新编译界面，进程就在下一次加载类时 NoClassDefFoundError
+tasks.named<Sync>("installDist") {
+    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+}
+
+// 一条命令出整套：先 installDist，再用装出来的 jar 跑 all，--jobs 拉起的子进程沿用同一份类路径。
+// 不走 bin/ 下的启动脚本：它按 JAVA_HOME 找 java，本机 JAVA_HOME 常指着别的版本；脚本还分 sh 与 bat 两份。
+// 参数照 run 的写法：./gradlew :shots:renderAll --args="--only drive- --jobs 4"
+tasks.register<JavaExec>("renderAll") {
+    group = "application"
+    description = "用 installDist 的副本并行渲染整套截图，并与上一版比对"
+    val install = tasks.named<Sync>("installDist")
+    dependsOn(install)
+    // 顺序照启动脚本：本模块的 jar 在前，其后按运行时类路径的顺序，只是换成 lib/ 下的副本
+    val jar = tasks.named<Jar>("jar")
+    val runtime = configurations.runtimeClasspath
+    classpath = files(install.map { dist ->
+        val lib = dist.destinationDir.resolve("lib")
+        (listOf(jar.get().archiveFile.get().asFile) + runtime.get().files).map { lib.resolve(it.name) }.distinct()
+    })
+    mainClass = "dev.piko.shots.MainKt"
+    // Gradle 按 UTF-8 读进程输出，不设的话中文按控制台的代码页写出来，转发后成了乱码
+    jvmArgs = application.applicationDefaultJvmArgs.toList() + listOf("-Dstdout.encoding=UTF-8", "-Dstderr.encoding=UTF-8")
+    javaLauncher = javaToolchains.launcherFor { languageVersion = JavaLanguageVersion.of(25) }
+    workingDir = rootProject.projectDir
+    // --args 在配置之后、执行之前才填进来，命令名要在执行时补到最前面
+    doFirst { setArgs(listOf("all") + args.orEmpty()) }
+}

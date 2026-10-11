@@ -1,0 +1,211 @@
+# ui 模块
+
+两端共用的全部界面。网盘页另见 `src/commonMain/kotlin/dev/piko/ui/screens/drive/CLAUDE.md`，
+信息流另见 `screens/clips/CLAUDE.md`。
+
+`ui` 的桌面端与 Android 端用的 material3 版本不同（见 `desktopApp/CLAUDE.md` 的「版本」），同一行代码可能只在一端报错；
+1.12 的 material3 里部分 API 仍是实验性，本模块已统一 opt-in。
+
+## 响应式布局
+
+交互模型按平台定，密度按窗口宽度定，两者分开（`ui/.../adaptive/FormFactor.kt`）。
+
+- **桌面**（`isDesktopLayout()`）：侧边栏、外框与岛、地址栏与命令栏、标签、浮动卡片、属性卡片与目录图、右键菜单，
+  几件事可以同时挂着。任何宽度都是这一套，窗口窄了侧边栏收成窄轨，横排的东西经 `AdaptiveBar` 收进「更多」。
+- **移动**（手机与平板，Android）：栈导航、顶栏标题加分区跳转、FAB、条目上的更多按钮、独占的 sheet，一次一件事。
+  宽度只换导航（compact 是底部导航栏，更宽是收起的 Rail）、网格栏数、面板从侧边还是底部出来；平板与手机的交互完全一致。
+
+曾经只按宽度分（「桌面体验以 Android 平板为准」）：平板横握拿到桌面那套，没有鼠标却只有右键菜单，条目操作整个不可达；
+横握的手机宽度过线、高度不够，两套条件交错出一批两边都不管的状态。移动端接鼠标、桌面接触屏，是在各自的模型里补输入能力
+（右键菜单、悬停、快捷键在移动端照样生效），不换模型。新写的判断先问它属于哪一类：要不要标签、卡片、命令栏，看 `isDesktopLayout()`；
+放不放得下、排几栏，看 `WindowWidth.kt` 的宽度档。`:shots` 拍移动端要 `--mobile`（窄于 840dp 默认就是）。
+
+横排的东西（顶栏、工具栏、命令栏、列表页眉）一律经 `components/AdaptiveBar` 排：每项带优先级与收起后的菜单项，
+放不下时从低往高收进「更多」，标题与窗口按钮不收，整行不会溢出。不要再用 Row 加 TopAppBar 的 actions 摆一排按钮：
+TopAppBar 先量动作、标题拿剩下的，桌面窄窗口加上窗口按钮后标题与导航按钮被挤没（多选栏实测）。
+`PikoTopBar` 的 actions 已是 `List<BarItem>`，图标按钮用 `iconBarItem`。窄窗口带窗口按钮的样子用 `:shots` 的 `--caption` 看。
+另看高度一项：`isHeightCompact()`（不到 480dp，几乎就是横握的手机），只在移动端用：面板在 medium 宽度下也用侧边形态，
+目录选择器与批量重命名全屏，全屏的信息流收起系统栏（`PikoPlatform.HideSystemBars`，不锁方向）。
+桌面能同时挂着几件事，靠的是标签、浮动卡片与侧栏；移动端只有栈导航，网盘页里不另造挂起状态。一件事只在它的页面或面板开着时存在，
+离开即结束，或者做成压栈、返回即回到原处；不要做「离开了页面、事情挂在后台、靠把手或底条回去」。切到传输、「我的」不算离开：
+三个底部页面各自独立，网盘页的会话留着，回来原样。真正的后台任务（传输）有自己的去处，不在此列。信息流的「继续刷」也不在此列：
+它等于在信息流上盖一层网盘的栈，只盖一层，继续刷就原样回去，与桌面行为一致。新功能在桌面用到标签或浮动卡片时，先想好移动端怎么不需要它。
+- 导航按交互模型分：移动端是 `NavigationSuiteScaffold`，compact 是底部导航栏（`ShortNavigationBarCompact`），更宽（横握的手机、平板）
+  是收起的 Rail（`WideNavigationRailCollapsed`），三项相同，都写死而不交给库按窗口挑：库还看高度，横握的手机会得到一条横向底栏。
+  桌面任何宽度都是一整条侧边栏（`MainSidebar`），连同外框与并进内容的标题栏。窗口不到 `SidebarPushMinWindowWidth`（1000dp）时侧边栏只占窄轨，
+  展开的那一份带遮罩浮在内容上（照模态抽屉，点遮罩、返回或去了别处就收回，不改存下的收起状态）；更宽时展开是推开内容。
+  侧边栏上面是去处，下面是快速访问（`QuickAccessSection` / `QuickAccessState`），
+  照资源管理器只列用户固定的文件夹，文件夹右键「固定到快速访问」。PikPak 没有这项，存在偏好 `pinnedFolders` 里
+  经设置同步带走（`PinnedFolders`，只存 ID 与名字，打开时按 ID 查上级）。只亮一处：人在固定的文件夹里时亮它，否则亮当前页。
+  不要在导航栏旁边再并排一栏导航。侧边栏在 `NavDisplay` 外面，打开「我的」里的各页时不被盖住（应用内播放器这类
+  整窗的页照旧盖住，见 `sidebarMode`）。快速访问的条目右键可以在新标签页打开或取消固定。侧边栏不能拖宽，只能收起成只剩图标的窄轨
+  （顶上的开关或主修饰键+B，`sidebarCollapsedFlow`，每台设备各自的；各行读 `LocalSidebarCollapsed` 自己换成窄轨的样子）。
+  「文件」与「传输」是一组连体按钮；有传输在跑时「传输」按钮上写速度（上下行取快的一边）或项数
+  （`workbench/TransferActivity`）。蜗牛模式（限速，偏好 `snailModeFlow`，每台设备各自的，不同步）开着时「传输」按钮整个用强调色，
+  有没有传输都是。原来窗口底部的状态栏已去掉，不要再加回。
+  桌面画外框（`theme/Frame.kt`）：外框色（`frame`，`surfaceContainerHigh`）是底，上面浮着几块圆角的岛，岛与岛、岛与窗口边缘
+  之间露 `IslandGap`。侧边栏一块；网盘页与传输页右边一块，上半段是页眉（`islandHeader`，比岛深一档），下半段是列表（页面本色），
+  列表上沿是 `IslandInnerCorner` 的小圆角、露出一点页眉色，两段靠色阶分开，不画线。岛上沿是一排标签（`IslandTab`）：网盘页是位置，
+  传输页是类别；活动标签与页眉同色相连，第一个活动时岛的左上角不圆（`islandTopStart`）。外框色加深过一档：只深一档时活动标签与外框几乎同色。
+  **两块颜色相接处一律由浅的一方圆角压在深的一方上**，不让两块直接拼成一条硬直线：岛浮在外框上、列表的上沿露出页眉色、
+  登录页右边的表单是浮在品牌区外框色上的岛，都是这一条。新写的页要分区时照做。
+  各页经 `PikoScaffold` 的 `island`（`IslandPage`：标签、页眉、内容）得到这副骨架。标签只给要分类切换的页；没有分类的页
+  （我的分享、设置）不放标签，岛直接画到顶（上沿与侧边栏岛对齐），页名写在岛的页眉开头（`IslandTitle`），窗口按钮画在
+  页眉末尾，标题与操作之间用 `IslandHeaderSpace` 留空、可以拖动窗口。不要给这种页放一个写着页名的标签：没有别的可切，
+  它只是在冒充标题；也不要在顶上空出一行只放窗口按钮。
+  标题栏在 Windows 上
+  可并进内容（设置里的「紧凑标题栏」，`WindowCaption`）：贴着窗口右上角的那一行自己画窗口按钮，空白处经 `windowDragArea` 登记为拖动区。
+  主界面任何宽度都接管，登录页这类主界面之外的页仍是系统标题栏。
+  新写的顶栏要能画按钮：挂 `rememberCaptionSlot()` 的 modifier，按钮接在动作后面，标题后面的空白登记为拖动区。
+  各页一律用 `PikoScaffold`，不直接用 `Scaffold`：有外框时它把顶栏、底栏放在外框色上，内容裁成卡片；顶栏与底栏的高度
+  取 `Frame.kt` 的 `FrameTopRowHeight`、`FrameBottomRowHeight`，与侧边栏的图标行、账号行对齐。
+- 图标：平时一律描边（Outlined），选中、打开、正在生效时换实心（Filled），侧边栏、导航项、视图切换、开关按钮都照此。
+  挑图标时选实心与描边长得不一样的：History、Share、SyncAlt 两种写法同形，切换了看不出。播放器叠在画面上的操作按钮例外，用实心。
+- 顶栏滚动换色：列表页用 `PikoTopBar.kt` 的 `rememberListScrollTint`，按列表是否在顶端设顶栏状态，不要挂
+  `pinnedScrollBehavior` 的 nestedScroll。后者累加滚动量，列表换了内容（进子文件夹、换筛选）或根本滚不动时
+  仍停在换过色的状态。
+- 搜索框右端一直有取消按钮：有字时清空，没字时关掉搜索。触屏上没有 Esc，没有这个按钮就退不出去。
+- 返回栈：`PikoMainScaffold` 用 Navigation 3 的 `NavDisplay`，栈底 `Screen.Home` 是导航栏与三个根页面，
+  其余页面压在上面、连同导航栏一起盖住。被盖住的 Home 离开组合，回来时重建，所以根页面的状态要经得起
+  重建（网盘页的目录内容与滚动位置记在仓库里）。同理，要在离开页面后继续的工作不能用页面的 `rememberCoroutineScope`，
+  要挂到 `PikoServices` 上的进程级会话。新页面加一个 `Screen` 子类、登记进 `NavKeyConfiguration`、
+  在 `entryProvider` 里写一条 entry；切页与收起压栈页用 `resetToHome`，不要 `clear`，栈底必须留着 Home。
+- 「我的」只在移动端是一页（导航的第三项）；桌面的库与设置直接列在侧边栏上，账号、退出登录与关于并进设置，
+  详情页（我的分享、设置）压在当前页上、占满内容区、不给返回按钮，Esc 出栈回到原来那一页（`openPage` 不切到「我的」）。
+  原来 600–1200dp 的两栏（`ListDetailSceneStrategy`）已去掉。
+- 对话框一律用 `PikoDialog`（参数同 AlertDialog，标题小一号、圆角 16dp），不直接用 `AlertDialog`。执行动作的确认用
+  `PikoDialogConfirm`（有底色），删掉找不回的加 `destructive`（错误色），文案不随之改成「并删除」，也不另起一行红字；
+  取消仍是文字按钮。只是告知、只有「知道了」「完成」的，以及几条路并列由人挑的，用文字按钮。
+  M3 的基本对话框只用文字按钮，是按触屏设计的，在宽窗口里像漂在中间的手机卡片；两端统一用这一套，不按平台分。
+- 一页的主操作（添加链接、清空回收站、选中查重建议移走的）用 `PrimaryAction.kt`：宽窗口是命令栏右端有底色的按钮，
+  窄窗口是扩展 FAB，清空这类找不回的用错误色。页面只给出 `SheetAction`，不各自挑样式；不要再收进「更多」或做成顶栏图标。
+- 目录选择器在 compact 下全屏，更宽时是居中的基本对话框。对话框在 Android 上是按内容定高、居中的独立窗口，
+  内容高度一变整个对话框就跳：对话框里不做尺寸动画，提示行常驻、出错只变色（issue #9）。
+- 面板：一律经 `PikoSheet`，承接临时任务（条目操作、传输详情、桌面窗口放不下右栏时的添加链接；移动端的添加链接与查找重复在下面说的独占 sheet 里）。桌面与移动端的 expanded
+  是从末端滑入的模态侧边面板，其余是只有展开一档的底部 sheet；不要直接用 `ModalBottomSheet`（播放器的面板另有横屏侧栏，除外）。
+  面板一律浮着，不停进外框右侧那一栏，桌面的添加链接除外（见下面「右侧那一栏」）：所有面板曾经都停进去过，那一栏同时还放详情与信息流，
+  几样轮流让位，返回键关哪个说不清，于是改为一律浮着（a01227c）。后来详情栏删了、查重成了标签、条目操作在桌面是右键菜单，
+  那一栏只剩信息流，添加链接才停回去。
+- 后台在跑的与关了没做完的，按交互模型分两套，不另设入口。桌面：要浏览、
+  要操作的开成网盘页的标签（查重），只看进度的是窗口右下角的浮动卡片（`workbench/FloatingTasks`：解压、归档、取消归档、
+  收起的添加链接）。卡片挂在主界面这一层，切到哪一页都在，一项一张，点开就地展开明细，可整摞收成角落的胶囊。
+  移动端按「不做复杂操作」收窄：解压、归档与取消归档列进传输页的「云端」，开始时网盘页提示一次、
+  「查看」跳过去，底部导航栏的「传输」挂项数徽标，Android 的进度通知点进来也到传输页。查找重复与添加链接在网盘页底部的
+  sheet 里（`screens/drive/TaskSheet.kt`，M3 的 standard bottom sheet，展开与部分展开两档，部分展开只露出标题、状态与进度那一截，
+  没有隐藏一档）。按番号规范命名一个文件夹不在这里：它的扫描在批量重命名的对话框里，关掉即放弃，不算后台工作。
+  进度的文案与进度值只有一处：`WorkProgress.kt`（标题、确定或不定的进度、主状态、次要说明），传输页的解压与归档行和详情面板、
+  桌面的浮动卡片、Android 的进度通知都从它取，不各拼一份；新加一种后台工作先在那里加一个构造函数，测试在 `WorkProgressTest`。
+  行的版式同下载行：类别标签、主状态与次要说明一行，下面一根线性进度条（`WorkMeterBar`），总量未知时不定，待输密码时不画。
+  Android 的系统通知只在应用不在前台时出现（`app/.../download/AppVisibility`，按 `ProcessLifecycleOwner`）：前台服务必须挂着进度通知，
+  所以前台时不开前台服务，退到后台且仍有工作（`hasBackgroundWork`）时才拉起，回到前台由服务自己退下并撤掉通知。
+  结局通知同样只在后台发；前台时网盘页的提示与传输页的 Snackbar（解压与归档做完、行消失时）说明结局。
+  记进改动日志（`DriveChangeJournal`）的结局（归档、取消归档做成的部分）例外：由主界面带「撤销」弹在三个根页面共用的
+  Snackbar 队列上（`LocalRootSnackbar`，`showChangeNotices`，在哪一页、退到后台回来都弹），传输页按 `Outcome.undoable` 略过，不再说第二遍。
+  根页面一律用这个队列，不各自 `remember` 一个：各页的 Scaffold 照旧摆 SnackbarHost，位置不变。它是独占的：同一时刻只有一件事占着，信息流的临时浏览（「继续刷」那一段）也算一件，
+  再开别的（添加链接、查找重复、打开信息流、临时浏览里进压缩包）先确认结束眼前这件（「结束查找重复并添加链接？」），
+  入口一律经 `workbench/TaskSlot` 的 `claim`，不各写一份确认，也不静默替换。谁在占用从各会话的状态读，不另存。
+  离开查找重复所在的位置同样是一次确认（「结束查找重复？」），在仓库换栈之前拦下（`PikoDriveRepository.leaveGuard`；
+  先切页、跳过去再标出某项这类多步的入口经 `navigateThen` 整个动作一起问，取消时人留在原来的页面），
+  两种确认是同一个对话框（`ClaimDialog`）。添加链接不跟位置走，离开不问；信息流临时浏览的离开规则照旧。
+  不要再做底部的状态条、把手或 chip：收起就是同一个 sheet 停在低的一档。也不要做汇总几样后台工作的底部条：
+  M3 没有这种组件，Snackbar 一次一条、不能常驻多项。
+  命令栏右端曾有一个「收着的东西」竖排菜单，看着像操作、实为导航，已删，不要再加回。
+- 右侧那一栏只在桌面，放信息流或添加链接，同一时刻只放一样，不做标签切换（用户定的：两者不同时出现）；移动端的信息流一律全屏，
+  平板也是。两者的位置、宽度与拖宽是同一份（`PikoMainScaffold` 的 `feedFrame`，宽度存在 `clipPanelFlow`）。
+  添加链接挤得走信息流，信息流挤不走添加链接：添加链接是有未完成工作的任务，信息流只是浏览。开着信息流时打开添加链接，
+  信息流挂起让位（与离开文件夹同一种挂起，见 `screens/clips/CLAUDE.md`），右栏换成添加链接；添加链接关掉后信息流不自动回来，
+  命令栏「信息流」按钮上的小圆点提示它还在，点了才继续，右栏里的东西不自己跳回来。添加链接停在右栏时「信息流」按钮与命令面板里的
+  信息流入口置灰（不藏起来），提示写明原因；添加链接收成右下角的浮动卡片后右栏就空了，信息流照常打开。
+  窗口窄得放不下右栏（`sidePanelFits`）时添加链接退回浮动的模态侧边面板，信息流照旧是全屏。
+- 添加链接的收起、结束与换链接（会话 `InstantSession`）。收起：右栏与浮动侧边面板栏头的收起按钮、Esc、点遮罩，手机上 sheet 降到
+  部分展开；收起后是右下角的浮动卡片（手机上就是 sheet 露出的那一截）。再点「添加链接」回到收着的那一次（`reopen`），不清掉开新的。
+  结束：栏头、浮动侧边面板顶上、浮动卡片与手机 sheet 头上的 ×（「放弃添加」），正在保存时置灰；人亲手勾过要保存的文件、
+  还没保存时先确认一次（`InstantSession.endNeedsConfirm`，解析后的默认勾选与全部取消都不算），确认只在 `rememberDiscardAddLink` 写一处。
+  换链接：输入框一直在，外部带链接打开的也填着那条链接，解析出结果后缩成一行；在框里改或粘贴就在同一个会话里重新解析，不另设按钮。
+  批量列表里没有输入框，换一批先点 ×。会话收着且不是空的（`hasCollapsedWork`）时，入口挂与挂起的信息流同一种小圆点（`PendingBadge`）：
+  桌面是命令栏右端的「添加链接」，手机是 FAB 菜单里那一项；「+」本身不挂，M3 的 badge 锚在通往那件事的入口图标上，收着的会话在 sheet 那一截上也看得见。焦点在右栏的添加链接里时 Esc 把它收起；
+  信息流不拦 Esc，照旧归网盘页回上一级（它一打开就取得焦点，拦下就成了一按 Esc 清空队列），焦点在列表里时 Esc 同样归网盘页；右栏一打开添加链接就取得焦点，按在右栏里同样取回焦点。
+  目录图是浮在列表上的面板；条目的属性经右键菜单「属性」打开一张浮动的属性卡片（不跟随选中，一次一张），
+  两者外壳同为 `screens/drive/FloatingPanel.kt`，与信息流可同时开着；两块浮窗最近碰过的在上面。目录图停在右上角、可改大小，不钉住时收成贴边的把手；
+  属性卡片出现在触发它的地方，大小随内容、不给改，见 `screens/drive/CLAUDE.md`。
+
+## 设置页
+
+设置项全在 `screens/settings/SettingsScreen.kt`，行、组与对话框的外壳在同目录的 `SettingsLayout.kt`。加设置项照下面做。
+
+- 分类（`SettingsSection`）按用户要做的事分：账号、外观、浏览与播放、保存与命名、下载与传输、网络、同步与数据、关于。
+  账号与关于只在桌面，移动端在「我的」页。新项先归进已有的一类，不为一两项另开一类；一类里不止一组时才给组标题。
+  每类都有类标题，两端、各宽度的层级相同，不在窄窗口省掉类标题、改由组标题兼任（ux-review L9）。
+- 行一律用 `SettingsRow` 或其包装 `SettingsSwitchRow`、`SettingsNavigationRow`，放进 `SettingsGroup`；不是标准行的一块
+  （账号卡片、关于卡片、WebDAV 的应用）用 `SettingsCard`。不要再用 `SegmentedListItem` 或自己拼 Surface：外侧圆角由组裁出，
+  行只画内侧小圆角，不逐行传位置，单项组与多项组的圆角因此一致（M14）。
+- 对齐：前导图标与行尾控件都对标题与说明整块垂直居中，同一条中线；下方附加控件（分段按钮、色块）
+  左缘与标题文字齐。尺寸按交互模型取（`settingsStyle()`）：桌面照 Windows 设置页的卡片，每项一张 8dp 圆角的卡片、间距 4dp、
+  20dp 图标配 14sp 标题、行高 64dp；移动端照 M3 分段列表，外侧 16dp、内侧 4dp、间距 2dp、24dp 图标配 16sp 标题、行高至少 56dp。
+- 行尾：开关；去下一页画箭头；弹对话框或当场执行的不画；动作用 `SettingsRowButton`（tonal 或描边），不用文字按钮，
+  文字按钮禁用时只是一行灰字，看不出是按钮。行禁用时标题、图标与控件淡去，说明照常显示，写明为什么不可用。
+- 选择：二三选一用 `SettingsSegmentedChoice` 放在行尾，手机竖握放不下时挪到标题下方；选项多的用 `SettingsChoiceDialog`
+  加 `SettingsChoiceOption`，点选即生效，只有一个「关闭」。要填写的用 `SettingsInputDialog`（「取消」「保存」），
+  输入框用 `PikoTextField`（M2、M3）。
+- 依赖：依赖同组上一行开关的用 `DependentRow`，关着时收起；依赖别的类里的开关时留着并禁用，说明写「需先开启……」，
+  收起的话人找不到它去了哪。
+- 桌面目录在设置页宽到 900dp 时出现，平板与手机没有。亮哪一类由 `activeSettingsSection` 定：点了的一类在滚动途中与停下后都亮，
+  滚到底亮最后一类（末尾几类矮，起点到不了视口顶端，M13），测试在 `ActiveSettingsSectionTest`。
+
+## 鼠标与键盘
+
+条目右键弹出与操作面板相同的菜单（`ContextMenuArea`）；右键点在几项选中里的一项上时菜单作用于全部选中的，照资源管理器。
+长按按交互模型分（`longPressSelects`），输入方式看指针事件自带的类型，不看「最近一次输入」：移动端长按进多选；桌面上触屏与笔
+按住、抬起后在按下处弹同一份菜单（照 Windows，按住等于右键），鼠标左键按住什么也不做，多选照旧靠主修饰键、Shift 与框选。
+桌面触屏进多选的入口是菜单里的「选择」（`ContextMenuArea` 的 `onSelect`，多选时不给）。行组件（`FileListItem`、海报墙与图库的
+`cardInteraction`）在桌面上不挂长按，新列表照这两处做，不在页里各写判断。嵌套的菜单区（网格空白处包着条目）一次按住只归最里层。
+列表一律用按行对齐的 `LazyVerticalGrid`（`PikoItemGrid`），不用瀑布流：瀑布流按最矮的一栏放，顺序会在各栏间跳。每页把一项的操作写成一个
+`actionsFor`，面板与菜单都读它（网盘页是 `DriveScreen` 的 `itemActions`）；新列表照做。
+面板与菜单怎么摆由 `components/ActionLayout.kt` 的 `layoutActions` 统一定，两端一套：危险项（`destructive`）垫底、错误色，「属性」
+（`ActionGroup.Properties`）在它之前，各自成组；其余按 `SheetAction.tier` 分两档，顶上一排图标（面板是图标加
+`shortLabel`、至多 4 个，菜单是纯图标、名字在悬停提示里、至多 5 个，见 `layoutActions` 的 `quickLimit`）与列表，列表按 `group` 一组一道分隔。非危险项连同属性不超过 6 项时
+不分档、全部平铺。两端都没有「更多」：菜单只在桌面上，窗口放得下一整列，菜单长过窗口时在菜单里滚动；面板曾把用得少的收进
+末尾一行就地展开，现在靠把作用于位置的命令移出移动端的面板做到一屏平铺：文件夹的查找重复与按番号规范命名在进去后的列表页眉菜单里，
+来源链接写在面板头部，库与查重结果里不给「复制到」（见 `screens/drive/CLAUDE.md`「条目的操作」）。上限是列表连同属性与危险项至多 8 行、
+加一排图标，在 400x860 的竖屏上不滚（`MobilePanelSizeTest`）；给某类条目加操作先算一遍，超了就想它是不是作用于这一项的。
+菜单原先的「更多」是原地换上的一页，同样不要加回，也不做弹出式子菜单（material3 没有，自己做要处理悬停延时与斜穿）。
+菜单向上翻转时次序不反过来（理由见 `ActionMenu`）。菜单打开时焦点在列表第一行，不在图标行：图标按钮一得焦点就弹提示，
+盖住下面一行。方向键挪的是弹层自己的焦点，`LocalFocusManager` 要在弹层里面取，在外面取到的是窗口主层的。
+快捷键一览（F1 或主修饰键+/，`ShortcutsDialog`）是手写的一张表，加了快捷键要同时写进去。
+命令面板（主修饰键+K，`CommandPalette`）：模糊搜索最近去过的与快速访问里的文件夹、当前目录的子文件夹、去处与命令，方向键挑、回车执行。
+全局的命令在 `PikoMainScaffold` 的 `paletteItems`；某一页自己的命令在页里经 `ContributePaletteItems` 登记，页面离开组合时撤掉
+（网盘页登记了新建文件夹、上传、视图、属性等）。新页面有值得键盘直达的操作就照这样登记。
+横排的内容挂 `verticalWheelScrollsRow`，鼠标的竖滚轮才滚得动它；
+图标按钮用 `TooltipIconButton`，快捷键写在提示里；Esc 经 `BackHandler` 触发返回。新加的界面同时照顾触屏与鼠标：
+下拉刷新之类只有触屏能用的操作，宽窗口要另给按钮。快捷键的主修饰键取 `PikoPlatform.shortcutModifier`（mac 上是 ⌘），不要写死 Ctrl。
+Compose 桌面端悬停移动事件的 `previousPosition` 恒等于 `position`，判断「鼠标动了」要自己记上一次的位置。
+
+放弹层（菜单、提示、对话框）的自定义布局用普通 `Layout`，不用 `SubcomposeLayout`：桌面端测量途中销毁弹层会让整个窗口崩掉，
+原因与其余规避见 `desktopApp/CLAUDE.md`。
+
+## 动效
+
+按平台分，不按输入方式分（按输入方式分时手感随触屏、鼠标来回变）：`PikoPlatform.motionStyle` 给出，
+Android 是 `MotionScheme.expressive()`，桌面是 `standard()`（几乎不回弹，同样距离约 200ms 到位，expressive 要约 400ms）。
+播放器控件另在 `PlayerTheme` 里用 expressive，不随平台。
+- 页面转场不走 motionScheme，走 `theme/Motion.kt` 的 `PikoMotion`，经 `LocalPikoMotion` 随主题注入，按平台取时长：
+  桌面取 WinUI 的 83、167、250ms，Android 取 M3 的 150 到 400ms；离场任何平台都不超过 200ms。切根页面是旧页淡完新页再淡入，
+  压栈是横滑加淡化，旧页淡完新页才开始淡入，两页不叠成半透明。新写转场用它给的 `topLevel`、`forward` 一类，不要自己写 tween。
+- 右键菜单与命令栏菜单在桌面上只淡入 80ms、不缩放（`MenuMotion`，只包这两处）。DropdownMenu 默认从 0.8 放大到 1，
+  graphicsLayer 的缩放同样作用于点击判定，右键后立刻点会点偏。右键菜单以指针为原点（`PointerMenuPositionProvider`）：
+  向右下展开，放不下就朝反方向，不用下拉菜单的规则（那会在下方放不下时整个翻到锚点上沿以上，锚点是整个条目乃至整片网格）。
+  工具栏按钮的下拉菜单仍用下拉规则。
+- 面板的 `hideThen` 当场通知关闭再执行动作，不等收起动画，面板直接消失。不能反过来先执行、等动画完再通知：
+  动作若改了开关面板的那个状态会被随后的关闭清掉，动作若让页面离开组合，关闭通知就发不出去。
+- 减少动画：系统设置与设置里的「减少动画」（`reduceMotionFlow`，每台设备各自的，不同步）取或，汇到进程里唯一的
+  `PikoMotionScale`（`MotionDurationScale`），为 0 时所有动画当场跳到终点。它由入口放进 Recomposer 的协程上下文：
+  桌面是 `Main.kt` 的 `runBlocking(motionScale) { awaitApplication { … } }`，窗口、弹层与对话框的 Recomposer 都从那里继承，
+  `MotionScaleInjectionTest` 守着这条链，升级 Compose 时看它；Android 是 `MainActivity` 给装饰视图换一个带缩放的
+  WindowRecomposer，注入之后 Compose 不再自己读开发者选项的动画缩放，由 `followSystemAnimatorScale` 接上。
+  系统设置的读取在 `desktop/motion/SystemReducedMotion`：Windows 读 `SPI_GETCLIENTAREAANIMATION`（即「辅助功能 → 视觉效果
+  → 动画效果」），经 `WindowsCaption` 窗口过程收到的 `WM_SETTINGCHANGE` 当场重读；macOS 读
+  `accessibilityDisplayShouldReduceMotion`，Linux 读 GNOME 的 `enable-animations`，两者在应用重新激活时重读。
+  减少动画时切页与面板也是跳切，与 Android 的「移除动画」一致。不要再试「归零之外给切页补淡入淡出」：Transition
+  （AnimatedContent、AnimatedVisibility 都靠它）每一帧从自己所在 LaunchedEffect 的协程上下文读缩放，那是 Recomposer 的
+  effect 上下文，整棵组合共用一份，没有按个别动画覆盖的入口；NavDisplay 又在内部自己驱动转场，外面包不进去。
+  缩放为 0 时无限动画停在终点那一帧，一直循环的装饰动画要读 `LocalPikoMotion.current.reduced` 自己画静态的样子（见骨架屏）。

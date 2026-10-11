@@ -196,6 +196,26 @@
       "imported_at": "2026-10-11T21:20:00+08:00",
       "checked_at": "2026-10-11T21:20:00+08:00",
       "verification": "文档与源码核验；未部署服务端实测、未启动桌面 App 捕获"
+    },
+    "https://github.com/nihildigit/piko": {
+      "tool_name": "piko",
+      "display_name": "Piko · 高性能多平台 PikPak 客户端",
+      "category": "文件传输",
+      "summary": "高性能、多平台的第三方 PikPak 网盘客户端，支持磁力解析、多并发传输、信息流快速预览与全端自适应",
+      "scenario": "PikPak 网盘高速下载与资源管理、磁力链接快速保存预览、多平台（Win/Mac/Linux/Android）离线与在线观影",
+      "platforms": [
+        "Windows",
+        "macOS",
+        "Linux",
+        "Android"
+      ],
+      "mode": "snapshot",
+      "ref": "v1.2.0",
+      "commit": "1a3e7916e2a8f43f11e829e2911547e2790b1205",
+      "license": "AGPL-3.0",
+      "imported_at": "2026-10-11T21:26:00+08:00",
+      "checked_at": "2026-10-11T21:26:00+08:00",
+      "verification": "文档与源码核验；未安装客户端实测、未连接实际网盘账号"
     }
   }
 }
