@@ -1,0 +1,2216 @@
+#include <ttpcomm/runtime_tags.h>
+#include "ttplayer/platform/optional_windows_api.h"
+#include "ttplayer/audio/builtin_file_info.h"
+#include "ttplayer/audio/format_probe.h"
+#include "ttplayer/audio/directshow_source.h"
+#include <mfapi.h>
+#include "ttplayer/audio/midi_player.h"
+#include "tag_genres.h"
+
+#include <algorithm>
+#include <array>
+#include <atomic>
+#include <cctype>
+#include <climits>
+#include <cstdint>
+#include <cstring>
+#include <cwchar>
+#include <limits>
+#include <optional>
+#include <propsys.h>
+#include <propkey.h>
+#include <propvarutil.h>
+#include <span>
+#include <shlobj.h>
+#include <string>
+#include <string_view>
+#include <system_error>
+#include <utility>
+#include <vector>
+#include <windows.h>
+
+namespace ttplayer::audio {
+namespace {
+
+using Bytes = std::vector<unsigned char>;
+constexpr std::uint64_t kMaximumTagBytes = 64ULL * 1024ULL * 1024ULL;
+
+class UniqueHandle {
+public:
+    UniqueHandle() = default;
+    explicit UniqueHandle(HANDLE value) noexcept : value_(value) {}
+    ~UniqueHandle() { Reset(); }
+    UniqueHandle(const UniqueHandle&) = delete;
+    UniqueHandle& operator=(const UniqueHandle&) = delete;
+    UniqueHandle(UniqueHandle&& other) noexcept : value_(other.Release()) {}
+    UniqueHandle& operator=(UniqueHandle&& other) noexcept {
+        if (this != &other) Reset(other.Release());
+        return *this;
+    }
+    [[nodiscard]] HANDLE Get() const noexcept { return value_; }
+    [[nodiscard]] explicit operator bool() const noexcept {
+        return value_ && value_ != INVALID_HANDLE_VALUE;
+    }
+    [[nodiscard]] HANDLE Release() noexcept {
+        const HANDLE value = value_;
+        value_ = nullptr;
+        return value;
+    }
+    void Reset(HANDLE value = nullptr) noexcept {
+        if (*this) CloseHandle(value_);
+        value_ = value;
+    }
+
+private:
+    HANDLE value_{};
+};
+
+template <class T>
+class ComPtr {
+public:
+    ComPtr() = default;
+    ~ComPtr() { Reset(); }
+    ComPtr(const ComPtr&) = delete;
+    ComPtr& operator=(const ComPtr&) = delete;
+    [[nodiscard]] T* Get() const noexcept { return value_; }
+    [[nodiscard]] T** Put() noexcept {
+        Reset();
+        return &value_;
+    }
+    void Reset() noexcept {
+        if (value_) value_->Release();
+        value_ = nullptr;
+    }
+
+private:
+    T* value_{};
+};
+
+std::uint32_t ReadLe32(const unsigned char* value) noexcept {
+    return static_cast<std::uint32_t>(value[0]) |
+           static_cast<std::uint32_t>(value[1]) << 8U |
+           static_cast<std::uint32_t>(value[2]) << 16U |
+           static_cast<std::uint32_t>(value[3]) << 24U;
+}
+
+std::uint32_t ReadBe32(const unsigned char* value) noexcept {
+    return static_cast<std::uint32_t>(value[0]) << 24U |
+           static_cast<std::uint32_t>(value[1]) << 16U |
+           static_cast<std::uint32_t>(value[2]) << 8U |
+           static_cast<std::uint32_t>(value[3]);
+}
+
+std::uint32_t ReadSynchsafe(const unsigned char* value) noexcept {
+    if ((value[0] | value[1] | value[2] | value[3]) & 0x80U)
+        return std::numeric_limits<std::uint32_t>::max();
+    return static_cast<std::uint32_t>(value[0]) << 21U |
+           static_cast<std::uint32_t>(value[1]) << 14U |
+           static_cast<std::uint32_t>(value[2]) << 7U |
+           static_cast<std::uint32_t>(value[3]);
+}
+
+void AppendLe32(Bytes& output, std::uint32_t value) {
+    output.push_back(static_cast<unsigned char>(value));
+    output.push_back(static_cast<unsigned char>(value >> 8U));
+    output.push_back(static_cast<unsigned char>(value >> 16U));
+    output.push_back(static_cast<unsigned char>(value >> 24U));
+}
+
+void AppendBe32(Bytes& output, std::uint32_t value) {
+    output.push_back(static_cast<unsigned char>(value >> 24U));
+    output.push_back(static_cast<unsigned char>(value >> 16U));
+    output.push_back(static_cast<unsigned char>(value >> 8U));
+    output.push_back(static_cast<unsigned char>(value));
+}
+
+void AppendSynchsafe(Bytes& output, std::uint32_t value) {
+    output.push_back(static_cast<unsigned char>((value >> 21U) & 0x7fU));
+    output.push_back(static_cast<unsigned char>((value >> 14U) & 0x7fU));
+    output.push_back(static_cast<unsigned char>((value >> 7U) & 0x7fU));
+    output.push_back(static_cast<unsigned char>(value & 0x7fU));
+}
+
+bool ReadAt(HANDLE file, std::uint64_t offset,
+            std::span<unsigned char> output) noexcept {
+    LARGE_INTEGER position{};
+    position.QuadPart = static_cast<LONGLONG>(offset);
+    if (!SetFilePointerEx(file, position, nullptr, FILE_BEGIN)) return false;
+    size_t done{};
+    while (done < output.size()) {
+        const DWORD request = static_cast<DWORD>(std::min<size_t>(
+            output.size() - done, static_cast<size_t>(MAXDWORD)));
+        DWORD read{};
+        if (!ReadFile(file, output.data() + done, request, &read, nullptr) ||
+            read == 0)
+            return false;
+        done += read;
+    }
+    return true;
+}
+
+bool ReadAt(IStream* stream, std::uint64_t offset,
+            std::span<unsigned char> output) noexcept {
+    LARGE_INTEGER position{};
+    position.QuadPart = static_cast<LONGLONG>(offset);
+    if (FAILED(stream->Seek(position, STREAM_SEEK_SET, nullptr))) return false;
+    size_t done{};
+    while (done < output.size()) {
+        const ULONG requested = static_cast<ULONG>(std::min<size_t>(output.size()-done, MAXDWORD));
+        ULONG read{};
+        if (FAILED(stream->Read(output.data()+done, requested, &read)) || !read || read > requested)
+            return false;
+        done += read;
+    }
+    return true;
+}
+
+bool FileSize(IStream* stream, std::uint64_t& size) noexcept {
+    STATSTG stat{};
+    if (FAILED(stream->Stat(&stat, STATFLAG_NONAME))) return false;
+    size = stat.cbSize.QuadPart;
+    return size <= static_cast<ULONGLONG>(LLONG_MAX);
+}
+
+template<class File>
+bool ReadRange(File file, std::uint64_t offset, std::uint64_t size,
+               Bytes& output) {
+    if (size > kMaximumTagBytes ||
+        size > static_cast<std::uint64_t>(
+            std::numeric_limits<size_t>::max()))
+        return false;
+    try { output.resize(static_cast<size_t>(size)); }
+    catch (...) { return false; }
+    return ReadAt(file, offset, output);
+}
+
+bool FileSize(HANDLE file, std::uint64_t& size) noexcept {
+    LARGE_INTEGER value{};
+    if (!GetFileSizeEx(file, &value) || value.QuadPart < 0) return false;
+    size = static_cast<std::uint64_t>(value.QuadPart);
+    return true;
+}
+
+bool AsciiEqual(std::string_view left, std::string_view right) noexcept {
+    if (left.size() != right.size()) return false;
+    for (size_t index = 0; index < left.size(); ++index) {
+        const auto lhs = static_cast<unsigned char>(left[index]);
+        const auto rhs = static_cast<unsigned char>(right[index]);
+        if (std::tolower(lhs) != std::tolower(rhs)) return false;
+    }
+    return true;
+}
+
+bool WideAsciiEqual(std::wstring_view left,
+                    std::wstring_view right) noexcept {
+    if (left.size() != right.size()) return false;
+    for (size_t index = 0; index < left.size(); ++index) {
+        wchar_t lhs = left[index];
+        wchar_t rhs = right[index];
+        if (lhs >= L'A' && lhs <= L'Z') lhs += L'a' - L'A';
+        if (rhs >= L'A' && rhs <= L'Z') rhs += L'a' - L'A';
+        if (lhs != rhs) return false;
+    }
+    return true;
+}
+
+std::wstring DecodeLatin1(std::span<const unsigned char> value) {
+    std::wstring result;
+    result.reserve(value.size());
+    for (const auto character : value)
+        result.push_back(static_cast<wchar_t>(character));
+    return result;
+}
+
+std::wstring DecodeAnsi(std::span<const unsigned char> value) {
+    // 004DB2F0: encoding 0 -> ttpcomm ordinal 61 -> 00408544(CP_ACP).
+    // Many legacy Chinese ID3 tags contain GBK despite the Latin-1 label.
+    value = value.first(static_cast<size_t>(
+        std::find(value.begin(), value.end(), 0) - value.begin()));
+    if (value.empty() || value.size() > INT_MAX) return {};
+    const auto* text = reinterpret_cast<const char*>(value.data());
+    const int length = static_cast<int>(value.size());
+    const int count = MultiByteToWideChar(CP_ACP, 0, text, length, nullptr, 0);
+    if (count <= 0) return DecodeLatin1(value);
+    std::wstring result(static_cast<size_t>(count), L'\0');
+    if (MultiByteToWideChar(CP_ACP, 0, text, length, result.data(), count) != count)
+        return DecodeLatin1(value);
+    return result;
+}
+
+std::wstring DecodeUtf8(std::span<const unsigned char> value) {
+    if (value.empty()) return {};
+    const int count = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
+        reinterpret_cast<const char*>(value.data()),
+        static_cast<int>(std::min<size_t>(value.size(), INT_MAX)), nullptr, 0);
+    if (count <= 0) return {};
+    std::wstring result(static_cast<size_t>(count), L'\0');
+    if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
+            reinterpret_cast<const char*>(value.data()),
+            static_cast<int>(value.size()), result.data(), count) != count)
+        return {};
+    return result;
+}
+
+std::wstring DecodeUtf16(std::span<const unsigned char> value,
+                         bool big_endian) {
+    if (value.size() < 2) return {};
+    size_t offset{};
+    if (value.size() >= 2 && value[0] == 0xffU && value[1] == 0xfeU) {
+        big_endian = false;
+        offset = 2;
+    } else if (value.size() >= 2 && value[0] == 0xfeU && value[1] == 0xffU) {
+        big_endian = true;
+        offset = 2;
+    }
+    std::wstring result;
+    result.reserve((value.size() - offset) / 2);
+    for (; offset + 1 < value.size(); offset += 2) {
+        const std::uint16_t character = big_endian
+            ? static_cast<std::uint16_t>(value[offset]) << 8U |
+                  static_cast<std::uint16_t>(value[offset + 1])
+            : static_cast<std::uint16_t>(value[offset]) |
+                  static_cast<std::uint16_t>(value[offset + 1]) << 8U;
+        if (character == 0) break;
+        result.push_back(static_cast<wchar_t>(character));
+    }
+    return result;
+}
+
+std::wstring DecodeText(unsigned char encoding,
+                        std::span<const unsigned char> value) {
+    // UTF-16 terminators are whole code units. Trimming individual zero bytes
+    // drops the high byte of a final ASCII character (including TXXX names).
+    if (encoding == 0 || encoding == 3)
+        while (!value.empty() && value.back() == 0) value = value.first(value.size() - 1);
+    switch (encoding) {
+    case 0: return DecodeAnsi(value);
+    case 1: return DecodeUtf16(value, false);
+    case 2: return DecodeUtf16(value, true);
+    case 3: return DecodeUtf8(value);
+    default: return {};
+    }
+}
+
+Bytes EncodeUtf8(std::wstring_view value) {
+    if (value.empty() || value.size() > INT_MAX) return {};
+    // WC_ERR_INVALID_CHARS is Vista+. XP rejects it even for plain ASCII,
+    // which used to silently write empty APEv2 values and extended names.
+    // Validate UTF-16 ourselves so flags=0 retains strict conversion on XP.
+    for (size_t index = 0; index < value.size(); ++index) {
+        const auto unit = static_cast<unsigned>(value[index]);
+        if (unit >= 0xd800U && unit <= 0xdbffU) {
+            if (++index == value.size() || value[index] < 0xdc00U ||
+                value[index] > 0xdfffU) return {};
+        } else if (unit >= 0xdc00U && unit <= 0xdfffU) {
+            return {};
+        }
+    }
+    const int count = WideCharToMultiByte(CP_UTF8, 0,
+        value.data(), static_cast<int>(value.size()),
+        nullptr, 0, nullptr, nullptr);
+    if (count <= 0) return {};
+    Bytes result(static_cast<size_t>(count));
+    if (WideCharToMultiByte(CP_UTF8, 0, value.data(),
+            static_cast<int>(value.size()),
+            reinterpret_cast<char*>(result.data()), count, nullptr,
+            nullptr) != count)
+        return {};
+    return result;
+}
+
+Bytes EncodeLatin1(std::wstring_view value) {
+    Bytes result;
+    result.reserve(value.size());
+    for (const wchar_t character : value)
+        result.push_back(character <= 0xff
+            ? static_cast<unsigned char>(character)
+            : static_cast<unsigned char>('?'));
+    return result;
+}
+
+Bytes EncodeText(std::wstring_view value, unsigned char encoding) {
+    Bytes result;
+    if (encoding == 0) {
+        // 004DC59D -> 0040175C(CP_ACP). Keep the legacy read/write pair
+        // symmetric; truncating wchar_t to Latin-1 destroys Chinese tags.
+        if (value.empty() || value.size() > INT_MAX) return {};
+        const int length = static_cast<int>(value.size());
+        const int count = WideCharToMultiByte(CP_ACP, 0, value.data(), length,
+            nullptr, 0, nullptr, nullptr);
+        if (count <= 0) throw std::system_error(GetLastError(), std::system_category());
+        result.resize(static_cast<size_t>(count));
+        if (WideCharToMultiByte(CP_ACP, 0, value.data(), length,
+                reinterpret_cast<char*>(result.data()), count, nullptr, nullptr) != count)
+            throw std::system_error(GetLastError(), std::system_category());
+    } else if (encoding == 3) {
+        result = EncodeUtf8(value);
+    } else {
+        result.reserve(value.size() * 2 + 2);
+        result.push_back(0xffU);
+        result.push_back(0xfeU);
+        for (const wchar_t character : value) {
+            result.push_back(static_cast<unsigned char>(character));
+            result.push_back(static_cast<unsigned char>(character >> 8U));
+        }
+    }
+    return result;
+}
+
+struct TagData {
+    std::vector<BuiltinMetadataEntry> fields;
+    Bytes cover;
+};
+
+// TPE2 was named Orchestra by the original player.  Expose one editable
+// value while retaining AlbumArtist for SMTC and modern metadata consumers.
+std::wstring_view CanonicalTagName(std::wstring_view name) {
+    if (WideAsciiEqual(name, L"Orchestra") || WideAsciiEqual(name, L"Album Artist"))
+        return L"AlbumArtist";
+    if (WideAsciiEqual(name, L"Lyric")) return L"Lyrics";
+    if (WideAsciiEqual(name, L"Author")) return L"Artist";
+    if (WideAsciiEqual(name, L"Track")) return L"Tracknumber";
+    if (WideAsciiEqual(name, L"Year")) return L"Date";
+    return name;
+}
+
+bool SameTagName(std::wstring_view left, std::wstring_view right) {
+    return WideAsciiEqual(CanonicalTagName(left), CanonicalTagName(right));
+}
+
+std::wstring GetField(const TagData& data, std::wstring_view name) {
+    const auto found = std::find_if(data.fields.begin(), data.fields.end(),
+        [name](const auto& field) { return SameTagName(field.name, name); });
+    return found == data.fields.end() ? std::wstring{} : found->value;
+}
+
+void SetField(TagData& data, std::wstring name, std::wstring value,
+              bool replace = true) {
+    name = CanonicalTagName(name);
+    const auto found = std::find_if(data.fields.begin(), data.fields.end(),
+        [&name](const auto& field) {
+            return SameTagName(field.name, name);
+        });
+    if (found == data.fields.end()) {
+        if (!value.empty())
+            data.fields.push_back({std::move(name), std::move(value)});
+    } else if (replace) {
+        if (value.empty()) data.fields.erase(found);
+        else found->value = std::move(value);
+    }
+}
+
+void MergeMissing(TagData& destination, const TagData& source) {
+    for (const auto& field : source.fields) {
+        if (GetField(destination, field.name).empty() && !field.value.empty())
+            SetField(destination, field.name, field.value, false);
+    }
+    if (destination.cover.empty() && !source.cover.empty())
+        destination.cover = source.cover;
+}
+
+std::wstring CanonicalField(std::string_view name) {
+    if (AsciiEqual(name, "title")) return L"Title";
+    if (AsciiEqual(name, "artist") || AsciiEqual(name, "author"))
+        return L"Artist";
+    if (AsciiEqual(name, "album")) return L"Album";
+    if (AsciiEqual(name, "track") || AsciiEqual(name, "tracknumber"))
+        return L"Tracknumber";
+    if (AsciiEqual(name, "genre")) return L"Genre";
+    if (AsciiEqual(name, "date") || AsciiEqual(name, "year"))
+        return L"Date";
+    if (AsciiEqual(name, "comment")) return L"Comment";
+    if (AsciiEqual(name, "albumartist") || AsciiEqual(name, "album artist") ||
+        AsciiEqual(name, "orchestra")) return L"AlbumArtist";
+    if (AsciiEqual(name, "lyrics") || AsciiEqual(name, "lyric")) return L"Lyrics";
+    if (AsciiEqual(name, "subtitle")) return L"Subtitle";
+    if (AsciiEqual(name, "copyright")) return L"Copyright";
+    if (AsciiEqual(name, "composer")) return L"Composer";
+    if (AsciiEqual(name, "conductor")) return L"Conductor";
+    if (AsciiEqual(name, "publisher")) return L"Publisher";
+    if (AsciiEqual(name, "encoder")) return L"Encoder";
+    if (AsciiEqual(name, "wwwuser")) return L"WWWUSER";
+    return {};
+}
+
+std::wstring ApeDisplayField(std::string_view name) {
+    const auto canonical = CanonicalField(name);
+    if (!canonical.empty()) return canonical;
+    try {
+        const Bytes bytes(name.begin(), name.end());
+        return DecodeUtf8(bytes);
+    } catch (...) {
+        return {};
+    }
+}
+
+std::string FrameSemantic(std::string_view identifier) {
+    if (identifier == "TIT2" || identifier == "TT2") return "Title";
+    if (identifier == "TIT3" || identifier == "TT3") return "Subtitle";
+    if (identifier == "TCOP" || identifier == "TCR") return "Copyright";
+    if (identifier == "TCOM" || identifier == "TCM") return "Composer";
+    if (identifier == "TPE1" || identifier == "TP1") return "Artist";
+    if (identifier == "TPE2" || identifier == "TP2") return "AlbumArtist";
+    if (identifier == "TPE3" || identifier == "TP3") return "Conductor";
+    if (identifier == "TALB" || identifier == "TAL") return "Album";
+    if (identifier == "TRCK" || identifier == "TRK") return "Tracknumber";
+    if (identifier == "TCON" || identifier == "TCO") return "Genre";
+    if (identifier == "TDRC" || identifier == "TYER" ||
+        identifier == "TYE") return "Date";
+    if (identifier == "COMM" || identifier == "COM") return "Comment";
+    if (identifier == "USLT" || identifier == "ULT") return "Lyrics";
+    if (identifier == "TPUB" || identifier == "TPB") return "Publisher";
+    if (identifier == "TENC" || identifier == "TEN") return "Encoder";
+    if (identifier == "WXXX" || identifier == "WXX") return "WWWUSER";
+    return {};
+}
+
+struct Id3Frame {
+    std::string identifier;
+    std::string semantic;
+    std::wstring metadata_name;
+    Bytes raw;
+};
+
+struct Id3Tag {
+    bool present{};
+    bool rewrite_safe{true};
+    unsigned char major{3};
+    std::uint64_t total_size{};
+    TagData data;
+    std::vector<Id3Frame> frames;
+};
+
+size_t EncodedTerminatorSize(unsigned char encoding) noexcept {
+    return ttpcomm::host::tags::TerminatorSize(encoding);
+}
+
+size_t FindEncodedTerminator(std::span<const unsigned char> value,
+                             unsigned char encoding) noexcept {
+    return ttpcomm::host::tags::FindTerminator({value.data(), value.size()}, encoding);
+}
+
+void DecodeId3Frame(std::string_view identifier,
+                    std::span<const unsigned char> payload, TagData& data) {
+    if (payload.empty()) return;
+    const unsigned char encoding = payload[0];
+    const auto semantic = FrameSemantic(identifier);
+    if (semantic == "WWWUSER") {
+        const auto text = payload.subspan(1);
+        const size_t separator = FindEncodedTerminator(text, encoding);
+        if (separator < text.size()) {
+            const auto url = text.subspan(separator + EncodedTerminatorSize(encoding));
+            SetField(data, L"WWWUSER", DecodeLatin1(url), false);
+        }
+        return;
+    }
+    if (!semantic.empty() && semantic != "Comment" && semantic != "Lyrics") {
+        SetField(data, std::wstring(semantic.begin(), semantic.end()),
+                 DecodeText(encoding, payload.subspan(1)), false);
+        return;
+    }
+    if (semantic == "Comment" || semantic == "Lyrics") {
+        if (payload.size() < 4) return;
+        auto text = payload.subspan(4);
+        const size_t separator = FindEncodedTerminator(text, encoding);
+        const size_t skip = separator < text.size()
+            ? separator + EncodedTerminatorSize(encoding) : text.size();
+        SetField(data, semantic == "Lyrics" ? L"Lyrics" : L"Comment", DecodeText(encoding, text.subspan(skip)),
+                 false);
+        return;
+    }
+    if (identifier == "TXXX" || identifier == "TXX") {
+        auto text = payload.subspan(1);
+        const size_t separator = FindEncodedTerminator(text, encoding);
+        if (separator >= text.size()) return;
+        const auto description = DecodeText(encoding, text.first(separator));
+        const size_t skip = separator + EncodedTerminatorSize(encoding);
+        if (!description.empty() && skip <= text.size())
+            SetField(data, description, DecodeText(encoding,
+                     text.subspan(skip)), false);
+        return;
+    }
+    if ((identifier == "APIC" || identifier == "PIC") && data.cover.empty()) {
+        const auto picture = ttpcomm::host::tags::Id3Picture({payload.data(), payload.size()},
+            identifier == "PIC" ? 2 : 3);
+        if (picture && !picture->data.empty())
+            data.cover.assign(picture->data.begin(), picture->data.end());
+    }
+}
+
+std::wstring Id3UserTextName(std::string_view identifier,
+                             std::span<const unsigned char> payload) {
+    if ((identifier != "TXXX" && identifier != "TXX") || payload.empty())
+        return {};
+    const unsigned char encoding = payload[0];
+    const auto text = payload.subspan(1);
+    const size_t separator = FindEncodedTerminator(text, encoding);
+    return DecodeText(encoding, text.first(separator));
+}
+
+Bytes RemoveUnsynchronization(std::span<const unsigned char> value) {
+    return ttpcomm::host::tags::RemoveUnsynchronization({value.data(), value.size()});
+}
+
+// libid3tag frame.c / id3_util_decompress: v2.3 prefixes the inflated
+// length before group identity; v2.4 places its syncsafe length after it.
+// Keep the stored frame bytes separate from the decoded view used by text,
+// lyrics and APIC. An encrypted or malformed frame is never treated as text.
+std::optional<std::span<const unsigned char>> Id3DecodedPayload(
+    std::span<const unsigned char> data, unsigned char major,
+    unsigned char flags, bool tag_unsynchronized, Bytes& storage,
+    std::uint64_t& inflate_budget) {
+    const auto view = ttpcomm::host::tags::DecodePayload({data.data(), data.size()}, major,
+        flags, tag_unsynchronized, storage, inflate_budget);
+    if (!view) return std::nullopt;
+    return std::span<const unsigned char>(view->data(), view->size());
+}
+
+template<class File>
+Id3Tag ReadId3v2(File file, std::uint64_t file_size) {
+    Id3Tag tag;
+    if (file_size < 10) return tag;
+    std::array<unsigned char, 10> header{};
+    if (!ReadAt(file, 0, header) ||
+        std::memcmp(header.data(), "ID3", 3) != 0)
+        return tag;
+    const auto major = header[3];
+    const auto payload_size = ReadSynchsafe(header.data() + 6);
+    if ((major < 2 || major > 4) ||
+        payload_size == std::numeric_limits<std::uint32_t>::max())
+        return tag;
+    const std::uint64_t footer = major == 4 && (header[5] & 0x10U) ? 10U : 0U;
+    const std::uint64_t total = 10ULL + payload_size + footer;
+    if (total > file_size || payload_size > kMaximumTagBytes) return tag;
+    Bytes payload;
+    if (!ReadRange(file, 10, payload_size, payload)) return tag;
+    tag.present = true;
+    tag.major = major;
+    tag.total_size = total;
+    if (header[5] & 0x80U) {
+        tag.rewrite_safe = false;
+        payload = RemoveUnsynchronization(payload);
+    }
+    const auto start = ttpcomm::host::tags::FrameStart({payload.data(), payload.size()}, major, header[5]);
+    if (!start) { tag.rewrite_safe = false; return tag; }
+    size_t offset = *start;
+    TagData user_text;
+    std::uint64_t inflate_budget = kMaximumTagBytes;
+    for (;;) {
+        const size_t begin = offset;
+        ttpcomm::host::tags::Frame parsed;
+        const auto status = ttpcomm::host::tags::NextFrame({payload.data(), payload.size()}, major, offset, parsed);
+        if (status != ttpcomm::host::tags::FrameStatus::frame) {
+            if (status == ttpcomm::host::tags::FrameStatus::invalid) tag.rewrite_safe = false;
+            break;
+        }
+        const std::string identifier(parsed.identifier);
+        const size_t end = offset;
+        Id3Frame frame;
+        frame.identifier = identifier;
+        frame.semantic = FrameSemantic(identifier);
+        frame.raw.assign(payload.begin() + static_cast<ptrdiff_t>(begin),
+                         payload.begin() + static_cast<ptrdiff_t>(end));
+        // Keep the existing conservative write policy for encoded frames.
+        // Reading a compressed frame must nevertheless expose its metadata,
+        // as the original host's libid3tag path does.
+        const bool encoded_frame = major != 2 &&
+            ((major == 3 && (parsed.flags & 0xc0U) != 0) ||
+             (major == 4 && (parsed.flags & 0x0eU) != 0));
+        if (encoded_frame)
+            tag.rewrite_safe = false;
+        const auto frame_payload =
+            std::span<const unsigned char>(parsed.payload.data(), parsed.payload.size());
+        Bytes decoded_storage;
+        const auto decoded = Id3DecodedPayload(frame_payload, major,
+            static_cast<unsigned char>(parsed.flags), (header[5] & 0x80U) != 0,
+            decoded_storage, inflate_budget);
+        if (decoded) {
+            // Native frames take precedence over old TXXX aliases, regardless
+            // of their physical order.  Saving removes both representations.
+            DecodeId3Frame(identifier, *decoded,
+                identifier == "TXXX" || identifier == "TXX" ? user_text : tag.data);
+            frame.metadata_name = Id3UserTextName(identifier, *decoded);
+        } else {
+            tag.rewrite_safe = false;
+        }
+        tag.frames.push_back(std::move(frame));
+        offset = end;
+    }
+    if (!std::all_of(payload.begin() + static_cast<ptrdiff_t>(offset), payload.end(),
+                    [](unsigned char byte) { return byte == 0; }))
+        tag.rewrite_safe = false;
+    MergeMissing(tag.data, user_text);
+    return tag;
+}
+
+struct ApeItem {
+    std::string key;
+    std::wstring semantic;
+    Bytes raw;
+    bool cover{};
+};
+
+struct ApeTag {
+    bool present{};
+    std::uint64_t physical_start{};
+    std::uint64_t footer_end{};
+    TagData data;
+    std::vector<ApeItem> items;
+};
+
+template<class File>
+std::optional<ApeTag> ReadApeAt(File file, std::uint64_t footer_end) {
+    if (footer_end < 32) return std::nullopt;
+    std::array<unsigned char, 32> footer{};
+    if (!ReadAt(file, footer_end - 32, footer) ||
+        std::memcmp(footer.data(), "APETAGEX", 8) != 0)
+        return std::nullopt;
+    const std::uint32_t size = ReadLe32(footer.data() + 12);
+    const std::uint32_t count = ReadLe32(footer.data() + 16);
+    if (size < 32 || size > kMaximumTagBytes || size > footer_end ||
+        count > 65536U)
+        return std::nullopt;
+    const std::uint64_t item_start = footer_end - size;
+    std::uint64_t physical_start = item_start;
+    if (item_start >= 32) {
+        std::array<unsigned char, 8> marker{};
+        if (ReadAt(file, item_start - 32, marker) &&
+            std::memcmp(marker.data(), "APETAGEX", 8) == 0)
+            physical_start -= 32;
+    }
+    Bytes items;
+    if (!ReadRange(file, item_start, size - 32U, items)) return std::nullopt;
+    ApeTag tag;
+    tag.present = true;
+    tag.physical_start = physical_start;
+    tag.footer_end = footer_end;
+    size_t offset{};
+    for (std::uint32_t index = 0; index < count; ++index) {
+        if (offset + 8 > items.size()) return std::nullopt;
+        const std::uint32_t value_size = ReadLe32(items.data() + offset);
+        const std::uint32_t flags = ReadLe32(items.data() + offset + 4);
+        const size_t key_begin = offset + 8;
+        const auto key_end = std::find(items.begin() +
+                static_cast<ptrdiff_t>(key_begin), items.end(), 0);
+        if (key_end == items.end()) return std::nullopt;
+        const size_t key_finish = static_cast<size_t>(key_end - items.begin());
+        const size_t value_begin = key_finish + 1;
+        if (value_size > items.size() - value_begin) return std::nullopt;
+        const size_t end = value_begin + value_size;
+        ApeItem item;
+        item.key.assign(reinterpret_cast<const char*>(items.data() + key_begin),
+                        key_finish - key_begin);
+        item.semantic = CanonicalField(item.key);
+        item.cover = AsciiEqual(item.key, "Cover Art (Front)");
+        item.raw.assign(items.begin() + static_cast<ptrdiff_t>(offset),
+                        items.begin() + static_cast<ptrdiff_t>(end));
+        const std::span<const unsigned char> value(
+            items.data() + value_begin, value_size);
+        const std::uint32_t kind = flags >> 1U & 3U;
+        if (kind == 0) {
+            const auto decoded = DecodeUtf8(value);
+            if (!decoded.empty())
+                SetField(tag.data,
+                    item.semantic.empty()
+                        ? ApeDisplayField(item.key) : item.semantic,
+                    decoded, false);
+        } else if (kind == 1 && AsciiEqual(item.key, "Cover Art (Front)")) {
+            const auto separator = std::find(value.begin(), value.end(), 0);
+            if (separator != value.end()) {
+                const size_t image = static_cast<size_t>(
+                    separator - value.begin()) + 1;
+                tag.data.cover.assign(
+                    value.begin() + static_cast<ptrdiff_t>(image), value.end());
+            }
+        }
+        tag.items.push_back(std::move(item));
+        offset = end;
+    }
+    return tag;
+}
+
+std::wstring DecodeLegacyTagText(std::span<const unsigned char> value) {
+    value = value.first(static_cast<size_t>(std::find(value.begin(), value.end(), 0) - value.begin()));
+    if (value.empty()) return {};
+    // ID3v1 files produced by the Chinese-era player commonly use the active
+    // ANSI code page.  Prefer valid UTF-8, otherwise preserve that behavior.
+    auto result = DecodeUtf8(value);
+    if (!result.empty()) return result;
+    return DecodeAnsi(value);
+}
+
+std::wstring TrimFixed(std::span<const unsigned char> value) {
+    while (!value.empty() && (value.back() == 0 || value.back() == ' '))
+        value = value.first(value.size() - 1);
+    return DecodeLegacyTagText(value);
+}
+
+TagData ReadId3v1(std::span<const unsigned char, 128> tag) {
+    TagData data;
+    if (std::memcmp(tag.data(), "TAG", 3) != 0) return data;
+    SetField(data, L"Title", TrimFixed(tag.subspan(3, 30)), false);
+    SetField(data, L"Artist", TrimFixed(tag.subspan(33, 30)), false);
+    SetField(data, L"Album", TrimFixed(tag.subspan(63, 30)), false);
+    SetField(data, L"Date", TrimFixed(tag.subspan(93, 4)), false);
+    const bool version_11 = tag[125] == 0 && tag[126] != 0;
+    SetField(data, L"Comment", TrimFixed(tag.subspan(
+        97, version_11 ? 28U : 30U)), false);
+    if (version_11)
+        SetField(data, L"Tracknumber", std::to_wstring(tag[126]), false);
+    if (tag[127] < kTagGenres.size()) {
+        const auto name = kTagGenres[tag[127]];
+        SetField(data, L"Genre", std::wstring(name.begin(), name.end()), false);
+    } else if (tag[127] != 0xffU) SetField(data, L"Genre", std::to_wstring(tag[127]), false);
+    return data;
+}
+
+struct Lyrics3Tag {
+    std::uint64_t physical_start{};
+    TagData data;
+};
+
+std::optional<size_t> ReadDecimal(std::span<const unsigned char> text) {
+    size_t value{};
+    for (const auto digit : text) {
+        if (digit < '0' || digit > '9' ||
+            value > (std::numeric_limits<size_t>::max() - (digit - '0')) / 10)
+            return std::nullopt;
+        value = value * 10 + digit - '0';
+    }
+    return value;
+}
+
+template<class File>
+std::optional<Lyrics3Tag> ReadLyrics3At(File file, std::uint64_t end) {
+    // 004DA9F2: six decimal length bytes followed by LYRICS200.  Check every
+    // boundary before accepting the block as a removable tag rather than audio.
+    if (end < 26) return std::nullopt;
+    std::array<unsigned char, 15> footer{};
+    if (!ReadAt(file, end - footer.size(), footer) ||
+        std::memcmp(footer.data() + 6, "LYRICS200", 9) != 0) return std::nullopt;
+    const auto size = ReadDecimal(std::span(footer).first(6));
+    if (!size || *size < 11 || *size > end - footer.size()) return std::nullopt;
+    Bytes bytes;
+    const auto start = end - footer.size() - *size;
+    if (!ReadRange(file, start, *size, bytes) ||
+        std::memcmp(bytes.data(), "LYRICSBEGIN", 11) != 0) return std::nullopt;
+    Lyrics3Tag tag;
+    tag.physical_start = start;
+    size_t offset = 11;
+    while (offset < bytes.size()) {
+        if (bytes.size() - offset < 8) return std::nullopt;
+        const std::string_view key(reinterpret_cast<const char*>(bytes.data() + offset), 3);
+        const auto length = ReadDecimal(std::span(bytes).subspan(offset + 3, 5));
+        offset += 8;
+        if (!length || *length > bytes.size() - offset) return std::nullopt;
+        const auto value = std::span<const unsigned char>(bytes).subspan(offset, *length);
+        const auto name = key == "ETT" ? L"Title" : key == "EAR" ? L"Artist" :
+            key == "EAL" ? L"Album" : key == "INF" ? L"Comment" :
+            key == "LYR" ? L"Lyrics" : L"";
+        if (*name) {
+            // The original detects UTF-8 for LYR and otherwise uses ACP.
+            // Preserve lyric whitespace; fixed ID3v1 padding rules do not apply.
+            SetField(tag.data, name, DecodeLegacyTagText(value), false);
+        }
+        offset += *length;
+    }
+    return tag;
+}
+
+struct FileLayout {
+    std::uint64_t file_size{};
+    std::uint64_t body_begin{};
+    std::uint64_t body_end{};
+    Id3Tag id3v2;
+    ApeTag ape;
+    TagData id3v1;
+    TagData lyrics3;
+    bool has_id3v1{};
+};
+
+template<class File>
+bool HasId3v1At(File file, std::uint64_t offset,
+                std::array<unsigned char, 128>& bytes) {
+    return ReadAt(file, offset, bytes) &&
+           std::memcmp(bytes.data(), "TAG", 3) == 0;
+}
+
+template<class File>
+bool ReadMp3Layout(File file, FileLayout& layout) {
+    if (!FileSize(file, layout.file_size)) return false;
+    layout.id3v2 = ReadId3v2(file, layout.file_size);
+    layout.body_begin = layout.id3v2.present ? layout.id3v2.total_size : 0;
+    layout.body_end = layout.file_size;
+
+    std::array<unsigned char, 128> id3v1_bytes{};
+    // Peel each recognized tail in physical order.  Both APE/Lyrics3/TAG and
+    // TAG/APE occur in real files; treating Lyrics3 as audio leaves stale text
+    // behind after the user deletes a field.
+    bool has_lyrics3{};
+    for (unsigned pass = 0; pass < 3; ++pass) {
+        if (!layout.has_id3v1 && layout.body_end >= id3v1_bytes.size() &&
+            HasId3v1At(file, layout.body_end - id3v1_bytes.size(), id3v1_bytes)) {
+            layout.has_id3v1 = true;
+            layout.id3v1 = ReadId3v1(id3v1_bytes);
+            layout.body_end -= id3v1_bytes.size();
+            continue;
+        }
+        if (!layout.ape.present) {
+            if (const auto ape = ReadApeAt(file, layout.body_end)) {
+                layout.ape = *ape;
+                layout.body_end = ape->physical_start;
+                continue;
+            }
+        }
+        if (!has_lyrics3) {
+            if (const auto lyrics = ReadLyrics3At(file, layout.body_end)) {
+                has_lyrics3 = true;
+                layout.lyrics3 = lyrics->data;
+                layout.body_end = lyrics->physical_start;
+                continue;
+            }
+        }
+        break;
+    }
+    return layout.body_begin <= layout.body_end;
+}
+
+TagData MergeMp3Tags(const FileLayout& layout,
+                     std::uint32_t priority) {
+    // 004DC174 supplies the historical ID3v1/Lyrics3 tail when an old XML
+    // value only contains the two high-priority bytes.
+    if ((priority & 0xffffU) == 0) priority |= 0x0102U;
+    TagData merged;
+    for (int shift = 24; shift >= 0; shift -= 8) {
+        switch (priority >> static_cast<unsigned>(shift) & 0xffU) {
+        case 1: MergeMissing(merged, layout.id3v1); break;
+        case 2: MergeMissing(merged, layout.lyrics3); break;
+        case 4: MergeMissing(merged, layout.ape.data); break;
+        case 8: MergeMissing(merged, layout.id3v2.data); break;
+        default: break;
+        }
+    }
+    return merged;
+}
+
+struct MpegHeader {
+    unsigned version{};
+    unsigned layer{};
+    unsigned bitrate_kbps{};
+    unsigned sample_rate{};
+    unsigned channels{};
+    std::uint32_t frames{};
+};
+
+std::optional<MpegHeader> DecodeMpegHeader(std::uint32_t value) {
+    if ((value & 0xffe00000U) != 0xffe00000U) return std::nullopt;
+    const unsigned version_bits = value >> 19U & 3U;
+    const unsigned layer_bits = value >> 17U & 3U;
+    const unsigned bitrate_index = value >> 12U & 15U;
+    const unsigned sample_index = value >> 10U & 3U;
+    if (version_bits == 1 || layer_bits == 0 || bitrate_index == 0 ||
+        bitrate_index == 15 || sample_index == 3)
+        return std::nullopt;
+    const unsigned version = version_bits == 3 ? 1U
+        : version_bits == 2 ? 2U : 25U;
+    const unsigned layer = 4U - layer_bits;
+    static constexpr unsigned rates[3]{44100, 48000, 32000};
+    unsigned sample_rate = rates[sample_index];
+    if (version == 2) sample_rate /= 2;
+    else if (version == 25) sample_rate /= 4;
+    static constexpr unsigned mpeg1_l1[16]{
+        0,32,64,96,128,160,192,224,256,288,320,352,384,416,448,0};
+    static constexpr unsigned mpeg1_l2[16]{
+        0,32,48,56,64,80,96,112,128,160,192,224,256,320,384,0};
+    static constexpr unsigned mpeg1_l3[16]{
+        0,32,40,48,56,64,80,96,112,128,160,192,224,256,320,0};
+    static constexpr unsigned mpeg2_l1[16]{
+        0,32,48,56,64,80,96,112,128,144,160,176,192,224,256,0};
+    static constexpr unsigned mpeg2_l23[16]{
+        0,8,16,24,32,40,48,56,64,80,96,112,128,144,160,0};
+    unsigned bitrate{};
+    if (version == 1)
+        bitrate = layer == 1 ? mpeg1_l1[bitrate_index]
+            : layer == 2 ? mpeg1_l2[bitrate_index]
+                         : mpeg1_l3[bitrate_index];
+    else
+        bitrate = layer == 1 ? mpeg2_l1[bitrate_index]
+                             : mpeg2_l23[bitrate_index];
+    if (bitrate == 0) return std::nullopt;
+    return MpegHeader{version, layer, bitrate, sample_rate,
+        (value >> 6U & 3U) == 3U ? 1U : 2U};
+}
+
+std::optional<MpegHeader> FindMpegHeader(HANDLE file,
+                                        const FileLayout& layout) {
+    if (layout.body_end <= layout.body_begin) return std::nullopt;
+    const std::uint64_t length = std::min<std::uint64_t>(
+        layout.body_end - layout.body_begin, 2ULL * 1024ULL * 1024ULL);
+    Bytes bytes;
+    if (!ReadRange(file, layout.body_begin, length, bytes)) return std::nullopt;
+    for (size_t index = 0; index + 4 <= bytes.size(); ++index) {
+        const std::uint32_t header = ReadBe32(bytes.data() + index);
+        if (auto decoded = DecodeMpegHeader(header)) {
+            // 004E5303 checks the next frame, not just an isolated sync word.
+            const size_t padding = (header >> 9U) & 1U;
+            const size_t frame_bytes = decoded->layer == 1
+                ? (12U * decoded->bitrate_kbps * 1000U / decoded->sample_rate + padding) * 4U
+                : ((decoded->layer == 3 && decoded->version != 1 ? 72U : 144U) *
+                    decoded->bitrate_kbps * 1000U / decoded->sample_rate + padding);
+            if (index + frame_bytes + 4U > bytes.size()) continue;
+            const auto next = DecodeMpegHeader(ReadBe32(bytes.data() + index + frame_bytes));
+            if (!next || next->version != decoded->version || next->layer != decoded->layer ||
+                next->sample_rate != decoded->sample_rate) continue;
+            if (decoded->layer == 3) {
+                const size_t side = decoded->version == 1
+                    ? (decoded->channels == 1 ? 17U : 32U)
+                    : (decoded->channels == 1 ? 9U : 17U);
+                const size_t xing = index + 4U + side;
+                if (xing + 12U <= bytes.size() &&
+                    (std::memcmp(bytes.data()+xing,"Xing",4)==0 ||
+                     std::memcmp(bytes.data()+xing,"Info",4)==0) &&
+                    (ReadBe32(bytes.data()+xing+4)&1U))
+                    decoded->frames = ReadBe32(bytes.data()+xing+8);
+                const size_t vbri = index + 36U;
+                if (!decoded->frames && vbri+18U <= bytes.size() &&
+                    std::memcmp(bytes.data()+vbri,"VBRI",4)==0)
+                    decoded->frames = ReadBe32(bytes.data()+vbri+14);
+            }
+            return decoded;
+        }
+    }
+    return std::nullopt;
+}
+
+HRESULT ReadMp3(const std::filesystem::path& path,
+                const Mp3TagPolicy& policy, BuiltinFileInfo& result) {
+    UniqueHandle file(CreateFileW(path.c_str(), GENERIC_READ,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+        OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr));
+    if (!file) return HRESULT_FROM_WIN32(GetLastError());
+    FileLayout layout;
+    if (!ReadMp3Layout(file.Get(), layout))
+        return HRESULT_FROM_WIN32(ERROR_INVALID_DATA);
+    const auto header = FindMpegHeader(file.Get(), layout);
+    if (!header) return HRESULT_FROM_WIN32(ERROR_INVALID_DATA);
+    const auto tags = MergeMp3Tags(layout, policy.read_priority);
+    result.capabilities = 4U;
+    result.codec = L"MPEG Audio";
+    result.metadata = tags.fields;
+    result.cover = tags.cover;
+    {
+        result.format.wFormatTag = header->layer == 3 ? WAVE_FORMAT_MPEGLAYER3 : WAVE_FORMAT_MPEG;
+        result.format.nChannels = static_cast<WORD>(header->channels);
+        result.format.nSamplesPerSec = header->sample_rate;
+        result.format.wBitsPerSample = 16;
+        result.format.nAvgBytesPerSec = header->bitrate_kbps * 125U;
+        result.format.nBlockAlign = 1;
+        result.encoded_bits_per_second = header->bitrate_kbps * 1000U;
+        result.codec = L"MPEG " + std::to_wstring(header->version) +
+            L" Layer " + std::to_wstring(header->layer);
+        if (header->bitrate_kbps != 0 && layout.body_end > layout.body_begin) {
+            // LAME's Xing/Info frame carries the actual frame count. The
+            // first frame bitrate is not the bitrate of a VBR/ABR stream.
+            const unsigned frame_samples = header->layer == 1 ? 384U :
+                header->layer == 3 && header->version != 1 ? 576U : 1152U;
+            const std::uint64_t milliseconds = header->frames
+                ? static_cast<std::uint64_t>(header->frames) * frame_samples *
+                    1000ULL / header->sample_rate
+                : (layout.body_end - layout.body_begin) * 8ULL / header->bitrate_kbps;
+            result.duration_ms = static_cast<DWORD>(
+                std::min<std::uint64_t>(milliseconds, MAXDWORD));
+            if (header->frames && milliseconds) {
+                result.encoded_bits_per_second = static_cast<DWORD>(
+                    std::min<std::uint64_t>((layout.body_end-layout.body_begin)*8000ULL /
+                        milliseconds,MAXDWORD));
+                result.format.nAvgBytesPerSec=result.encoded_bits_per_second/8U;
+            }
+        }
+    }
+    return S_OK;
+}
+
+std::wstring RiffInfoName(std::string_view identifier) {
+    if (identifier == "INAM") return L"Title";
+    if (identifier == "IART") return L"Artist";
+    if (identifier == "IPRD") return L"Album";
+    if (identifier == "ITRK") return L"Tracknumber";
+    if (identifier == "IGNR") return L"Genre";
+    if (identifier == "ICRD") return L"Date";
+    if (identifier == "ICMT") return L"Comment";
+    return {};
+}
+
+HRESULT ReadWave(const std::filesystem::path& path, BuiltinFileInfo& result) {
+    UniqueHandle file(CreateFileW(path.c_str(), GENERIC_READ,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+        OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr));
+    if (!file) return HRESULT_FROM_WIN32(GetLastError());
+    std::uint64_t file_size{};
+    std::array<unsigned char, 12> riff{};
+    if (!FileSize(file.Get(), file_size) || file_size < riff.size() ||
+        !ReadAt(file.Get(), 0, riff) ||
+        std::memcmp(riff.data(), "RIFF", 4) != 0 ||
+        std::memcmp(riff.data() + 8, "WAVE", 4) != 0)
+        return HRESULT_FROM_WIN32(ERROR_INVALID_DATA);
+    std::uint64_t offset = 12;
+    std::uint64_t data_bytes{};
+    while (offset + 8 <= file_size) {
+        std::array<unsigned char, 8> header{};
+        if (!ReadAt(file.Get(), offset, header)) break;
+        const std::uint32_t size = ReadLe32(header.data() + 4);
+        const std::uint64_t begin = offset + 8;
+        if (size > file_size - begin) break;
+        const std::string identifier(
+            reinterpret_cast<const char*>(header.data()), 4);
+        if (identifier == "fmt " && size >= 16) {
+            Bytes format;
+            if (ReadRange(file.Get(), begin, std::min<std::uint32_t>(
+                    size, static_cast<std::uint32_t>(sizeof(WAVEFORMATEX))),
+                    format)) {
+                std::memcpy(&result.format, format.data(),
+                            std::min(format.size(), sizeof(result.format)));
+            }
+        } else if (identifier == "data") {
+            data_bytes += size;
+        } else if (identifier == "LIST" && size >= 4 &&
+                   size <= kMaximumTagBytes) {
+            Bytes list;
+            if (ReadRange(file.Get(), begin, size, list) &&
+                std::memcmp(list.data(), "INFO", 4) == 0) {
+                size_t item = 4;
+                while (item + 8 <= list.size()) {
+                    const std::string key(
+                        reinterpret_cast<const char*>(list.data() + item), 4);
+                    const auto item_size = ReadLe32(list.data() + item + 4);
+                    item += 8;
+                    if (item_size > list.size() - item) break;
+                    const auto name = RiffInfoName(key);
+                    if (!name.empty())
+                        result.metadata.push_back({name, TrimFixed(
+                            std::span<const unsigned char>(list).subspan(
+                                item, item_size))});
+                    item += item_size + (item_size & 1U);
+                }
+            }
+        }
+        offset = begin + size + (size & 1U);
+    }
+    if (!result.format.nChannels || !result.format.nSamplesPerSec ||
+        !result.format.nAvgBytesPerSec || !result.format.nBlockAlign || !data_bytes)
+        return HRESULT_FROM_WIN32(ERROR_INVALID_DATA);
+    if (result.format.nAvgBytesPerSec != 0) {
+        result.duration_ms = static_cast<DWORD>(std::min<std::uint64_t>(
+            data_bytes * 1000ULL / result.format.nAvgBytesPerSec, MAXDWORD));
+        result.encoded_bits_per_second = result.format.nAvgBytesPerSec * 8U;
+    }
+    // The native Wave reader's short codec name feeds CPlayItem's Format
+    // placeholder (004AEB8F/0047A68C): an uncompressed WAV displays "PCM".
+    result.codec = result.format.wFormatTag == WAVE_FORMAT_PCM
+        ? L"PCM" : L"WAVE Audio";
+    return S_OK;
+}
+
+std::wstring PropertyText(IPropertyStore* store, const PROPERTYKEY& key) {
+    PROPVARIANT value{};
+    PropVariantInit(&value);
+    std::wstring result;
+    if (SUCCEEDED(store->GetValue(key, &value))) {
+        PWSTR text{};
+        if (SUCCEEDED(platform::PropVariantToStringAlloc(value, &text)) && text) {
+            result = text;
+            CoTaskMemFree(text);
+        }
+    }
+    PropVariantClear(&value);
+    return result;
+}
+
+std::uint64_t PropertyUInt64(IPropertyStore* store,
+                             const PROPERTYKEY& key) {
+    PROPVARIANT value{};
+    PropVariantInit(&value);
+    ULONGLONG result{};
+    if (FAILED(store->GetValue(key, &value)) ||
+        FAILED(platform::PropVariantToUInt64(value, &result))) result = 0;
+    PropVariantClear(&value);
+    return result;
+}
+
+HRESULT ReadShellFallback(const std::filesystem::path& path,
+                          BuiltinFileInfo& result) {
+    ComPtr<IPropertyStore> store;
+    const HRESULT opened = platform::SHGetPropertyStoreFromParsingName(path.c_str(),
+        nullptr, GPS_BESTEFFORT, IID_PPV_ARGS(store.Put()));
+    if (FAILED(opened) || !store.Get()) return opened;
+    const auto add = [&result, &store](const PROPERTYKEY& key,
+                                       const wchar_t* name) {
+        auto value = PropertyText(store.Get(), key);
+        if (!value.empty()) result.metadata.push_back({name, std::move(value)});
+    };
+    add(PKEY_Title, L"Title");
+    add(PKEY_Music_Artist, L"Artist");
+    add(PKEY_Music_AlbumTitle, L"Album");
+    add(PKEY_Music_TrackNumber, L"Tracknumber");
+    add(PKEY_Music_Genre, L"Genre");
+    add(PKEY_Media_Year, L"Date");
+    add(PKEY_Comment, L"Comment");
+    result.encoded_bits_per_second = static_cast<DWORD>(
+        std::min<std::uint64_t>(PropertyUInt64(
+            store.Get(), PKEY_Audio_EncodingBitrate), MAXDWORD));
+    result.format.nSamplesPerSec = static_cast<DWORD>(
+        std::min<std::uint64_t>(PropertyUInt64(
+            store.Get(), PKEY_Audio_SampleRate), MAXDWORD));
+    result.format.nChannels = static_cast<WORD>(
+        std::min<std::uint64_t>(PropertyUInt64(
+            store.Get(), PKEY_Audio_ChannelCount), MAXWORD));
+    if (result.encoded_bits_per_second != 0)
+        result.format.nAvgBytesPerSec =
+            result.encoded_bits_per_second / 8U;
+    const std::uint64_t duration_100ns = PropertyUInt64(
+        store.Get(), PKEY_Media_Duration);
+    result.duration_ms = static_cast<DWORD>(std::min<std::uint64_t>(
+        duration_100ns / 10000ULL, MAXDWORD));
+    auto extension = path.extension().wstring();
+    std::transform(extension.begin(), extension.end(), extension.begin(),
+        [](wchar_t value) {
+            return value >= L'a' && value <= L'z'
+                ? static_cast<wchar_t>(value - (L'a' - L'A')) : value;
+        });
+    if (!extension.empty() && extension.front() == L'.')
+        extension.erase(extension.begin());
+    result.codec = extension.empty() ? L"Audio" : extension + L" Audio";
+    return S_OK;
+}
+
+unsigned char EffectiveId3Encoding(std::uint32_t configured) noexcept {
+    // 004DC59D: 0 -> legacy ANSI (UI label Latin-1), 3 -> UTF-8, other nonzero
+    // persisted value -> UTF-16.  In particular historical value 2 is not
+    // silently reinterpreted as UTF-8 merely because the combo selects its
+    // third visible row.
+    return configured == 0 ? 0U : configured == 3 ? 3U : 1U;
+}
+
+void AppendTextFrame(Bytes& frames, unsigned char major,
+                     std::string_view identifier, std::wstring_view value,
+                     unsigned char encoding) {
+    if (value.empty()) return;
+    Bytes payload{encoding};
+    auto encoded = EncodeText(value, encoding);
+    payload.insert(payload.end(), encoded.begin(), encoded.end());
+    frames.insert(frames.end(), identifier.begin(), identifier.end());
+    if (major == 4) AppendSynchsafe(frames,
+        static_cast<std::uint32_t>(payload.size()));
+    else AppendBe32(frames, static_cast<std::uint32_t>(payload.size()));
+    frames.push_back(0);
+    frames.push_back(0);
+    frames.insert(frames.end(), payload.begin(), payload.end());
+}
+
+void AppendCommentFrame(Bytes& frames, unsigned char major,
+                        std::wstring_view value, unsigned char encoding,
+                        std::string_view identifier = "COMM") {
+    if (value.empty()) return;
+    Bytes payload{encoding, 'e', 'n', 'g'};
+    const size_t terminator = EncodedTerminatorSize(encoding);
+    payload.insert(payload.end(), terminator, 0);
+    auto encoded = EncodeText(value, encoding);
+    payload.insert(payload.end(), encoded.begin(), encoded.end());
+    frames.insert(frames.end(), identifier.begin(), identifier.end());
+    if (major == 4) AppendSynchsafe(frames,
+        static_cast<std::uint32_t>(payload.size()));
+    else AppendBe32(frames, static_cast<std::uint32_t>(payload.size()));
+    frames.push_back(0);
+    frames.push_back(0);
+    frames.insert(frames.end(), payload.begin(), payload.end());
+}
+
+void AppendUserTextFrame(Bytes& frames, unsigned char major,
+                         std::wstring_view name, std::wstring_view value,
+                         unsigned char encoding) {
+    if (name.empty() || value.empty()) return;
+    Bytes payload{encoding};
+    auto description = EncodeText(name, encoding);
+    payload.insert(payload.end(), description.begin(), description.end());
+    payload.insert(payload.end(), EncodedTerminatorSize(encoding), 0);
+    auto encoded = EncodeText(value, encoding);
+    payload.insert(payload.end(), encoded.begin(), encoded.end());
+    frames.insert(frames.end(), {'T', 'X', 'X', 'X'});
+    if (major == 4) AppendSynchsafe(frames,
+        static_cast<std::uint32_t>(payload.size()));
+    else AppendBe32(frames, static_cast<std::uint32_t>(payload.size()));
+    frames.push_back(0);
+    frames.push_back(0);
+    frames.insert(frames.end(), payload.begin(), payload.end());
+}
+
+void AppendUserUrlFrame(Bytes& frames, unsigned char major,
+                        std::wstring_view value, unsigned char encoding) {
+    if (value.empty()) return;
+    Bytes payload{encoding};
+    payload.insert(payload.end(), EncodedTerminatorSize(encoding), 0);
+    // Only the description has the selected text encoding. ID3 URLs always
+    // use Latin-1 bytes, independent of the legacy ANSI text compatibility.
+    const auto url = EncodeLatin1(value);
+    payload.insert(payload.end(), url.begin(), url.end());
+    frames.insert(frames.end(), {'W', 'X', 'X', 'X'});
+    if (major == 4) AppendSynchsafe(frames, static_cast<std::uint32_t>(payload.size()));
+    else AppendBe32(frames, static_cast<std::uint32_t>(payload.size()));
+    frames.insert(frames.end(), {0, 0});
+    frames.insert(frames.end(), payload.begin(), payload.end());
+}
+
+bool IsNativeId3Field(std::wstring_view name) {
+    static constexpr std::wstring_view names[]{
+        L"Title", L"Subtitle", L"Copyright", L"Composer", L"Artist",
+        L"AlbumArtist", L"Conductor", L"Album", L"Tracknumber", L"Date",
+        L"Publisher", L"Genre", L"Encoder", L"Comment", L"Lyrics", L"WWWUSER"};
+    return std::any_of(std::begin(names), std::end(names),
+        [name](const auto candidate) { return SameTagName(name, candidate); });
+}
+
+bool IsStandardField(std::wstring_view name) {
+    static constexpr std::wstring_view names[]{
+        L"Title", L"Artist", L"Album", L"Tracknumber", L"Genre",
+        L"Date", L"Comment"};
+    return std::any_of(std::begin(names), std::end(names),
+        [name](const auto candidate) {
+            return WideAsciiEqual(name, candidate);
+        });
+}
+
+void AppendPictureFrame(Bytes& frames, unsigned char major,
+                        std::span<const unsigned char> image) {
+    if (image.empty()) return;
+    std::string_view mime = "image/jpeg";
+    if (image.size() >= 8 && image[0] == 0x89U && image[1] == 'P' &&
+        image[2] == 'N' && image[3] == 'G') mime = "image/png";
+    else if (image.size() >= 2 && image[0] == 'B' && image[1] == 'M')
+        mime = "image/bmp";
+    else if (image.size() >= 3 && image[0] == 'G' && image[1] == 'I' &&
+             image[2] == 'F')
+        mime = "image/gif";
+    Bytes payload{0};
+    payload.insert(payload.end(), mime.begin(), mime.end());
+    payload.push_back(0);
+    payload.push_back(3); // front cover
+    payload.push_back(0); // empty description
+    payload.insert(payload.end(), image.begin(), image.end());
+    frames.insert(frames.end(), {'A', 'P', 'I', 'C'});
+    if (major == 4) AppendSynchsafe(frames,
+        static_cast<std::uint32_t>(payload.size()));
+    else AppendBe32(frames, static_cast<std::uint32_t>(payload.size()));
+    frames.push_back(0);
+    frames.push_back(0);
+    frames.insert(frames.end(), payload.begin(), payload.end());
+}
+
+Bytes BuildId3v2(const Id3Tag& previous, const TagData& fields,
+                 const Mp3TagPolicy& policy,
+                 BuiltinCoverAction cover_action,
+                 const std::vector<std::wstring>& modified) {
+    const unsigned char encoding = EffectiveId3Encoding(
+        policy.id3v2_encoding);
+    const unsigned char major = static_cast<unsigned char>(previous.present &&
+            (previous.major == 3 || previous.major == 4)
+        ? previous.major : encoding == 3 ? 4U : 3U);
+    Bytes frames;
+    std::vector<std::wstring> retained_names;
+    bool retained_picture{};
+    for (const auto& frame : previous.frames) {
+        if (!frame.semantic.empty()) continue;
+        if (IsNativeId3Field(frame.metadata_name)) continue;
+        if (!frame.metadata_name.empty() && std::any_of(modified.begin(), modified.end(),
+            [&frame](const auto& name) { return SameTagName(name, frame.metadata_name); })) continue;
+        const bool picture = frame.identifier == "APIC" ||
+                             frame.identifier == "PIC";
+        if (picture && cover_action != BuiltinCoverAction::unchanged)
+            continue;
+        frames.insert(frames.end(), frame.raw.begin(), frame.raw.end());
+        if (!frame.metadata_name.empty())
+            retained_names.push_back(frame.metadata_name);
+        retained_picture = retained_picture || picture;
+    }
+    AppendTextFrame(frames, major, "TIT2", GetField(fields, L"Title"),
+                    encoding);
+    AppendTextFrame(frames, major, "TIT3", GetField(fields, L"Subtitle"), encoding);
+    AppendTextFrame(frames, major, "TCOP", GetField(fields, L"Copyright"), encoding);
+    AppendTextFrame(frames, major, "TCOM", GetField(fields, L"Composer"), encoding);
+    AppendTextFrame(frames, major, "TPE1", GetField(fields, L"Artist"),
+                    encoding);
+    AppendTextFrame(frames, major, "TPE2", GetField(fields, L"AlbumArtist"), encoding);
+    AppendTextFrame(frames, major, "TPE3", GetField(fields, L"Conductor"), encoding);
+    AppendTextFrame(frames, major, "TPUB", GetField(fields, L"Publisher"), encoding);
+    AppendTextFrame(frames, major, "TENC", GetField(fields, L"Encoder"), encoding);
+    AppendTextFrame(frames, major, "TALB", GetField(fields, L"Album"),
+                    encoding);
+    AppendTextFrame(frames, major, "TRCK", GetField(fields, L"Tracknumber"),
+                    encoding);
+    AppendTextFrame(frames, major, "TCON", GetField(fields, L"Genre"),
+                    encoding);
+    const auto date = GetField(fields, L"Date");
+    AppendTextFrame(frames, major,
+        date.find(L'-') == std::wstring::npos ? "TYER" : "TDRC", date,
+        encoding);
+    AppendCommentFrame(frames, major, GetField(fields, L"Comment"), encoding);
+    AppendCommentFrame(frames, major, GetField(fields, L"Lyrics"), encoding, "USLT");
+    AppendUserUrlFrame(frames, major, GetField(fields, L"WWWUSER"), encoding);
+    for (const auto& field : fields.fields) {
+        if (field.value.empty() || IsNativeId3Field(field.name) ||
+            std::any_of(retained_names.begin(), retained_names.end(),
+                [&field](const auto& name) {
+                    return WideAsciiEqual(name, field.name);
+                }))
+            continue;
+        AppendUserTextFrame(frames, major, field.name, field.value, encoding);
+    }
+    if (!retained_picture) AppendPictureFrame(frames, major, fields.cover);
+
+    std::uint64_t target_total = 10ULL + frames.size();
+    if (policy.id3v2_padding) {
+        // 004DCA1E calls 004D9979 (lyrics/lyric), not an arbitrary-field test.
+        target_total = std::max<std::uint64_t>(
+            target_total, !GetField(fields, L"Lyrics").empty() ? 0x800U : 0x400U);
+        if (previous.present)
+            target_total = std::max(target_total, previous.total_size);
+    }
+    if (target_total - 10ULL > 0x0fffffffULL)
+        return {};
+    frames.resize(static_cast<size_t>(target_total - 10ULL), 0);
+    Bytes output{'I', 'D', '3', major, 0, 0};
+    AppendSynchsafe(output, static_cast<std::uint32_t>(frames.size()));
+    output.insert(output.end(), frames.begin(), frames.end());
+    return output;
+}
+
+void AppendApeTextItem(Bytes& items, std::string_view key,
+                       std::wstring_view value) {
+    if (value.empty()) return;
+    const auto encoded = EncodeUtf8(value);
+    AppendLe32(items, static_cast<std::uint32_t>(encoded.size()));
+    AppendLe32(items, 0);
+    items.insert(items.end(), key.begin(), key.end());
+    items.push_back(0);
+    items.insert(items.end(), encoded.begin(), encoded.end());
+}
+
+void AppendApeCoverItem(Bytes& items,
+                        std::span<const unsigned char> image) {
+    if (image.empty()) return;
+    static constexpr std::string_view key = "Cover Art (Front)";
+    static constexpr std::string_view filename = "cover";
+    const auto value_size = static_cast<std::uint32_t>(
+        filename.size() + 1U + image.size());
+    AppendLe32(items, value_size);
+    AppendLe32(items, 2U); // binary item
+    items.insert(items.end(), key.begin(), key.end());
+    items.push_back(0);
+    items.insert(items.end(), filename.begin(), filename.end());
+    items.push_back(0);
+    items.insert(items.end(), image.begin(), image.end());
+}
+
+Bytes ApeBlock(bool header, std::uint32_t size,
+               std::uint32_t count) {
+    Bytes block{'A','P','E','T','A','G','E','X'};
+    AppendLe32(block, 2000U);
+    AppendLe32(block, size);
+    AppendLe32(block, count);
+    AppendLe32(block, header ? 0xa0000000U : 0x80000000U);
+    AppendLe32(block, 0);
+    AppendLe32(block, 0);
+    return block;
+}
+
+Bytes BuildApe(const ApeTag& previous, const TagData& fields,
+               BuiltinCoverAction cover_action,
+               const std::vector<std::wstring>& modified = {}) {
+    Bytes items;
+    std::uint32_t count{};
+    bool retained_cover{};
+    std::vector<std::wstring> retained_names;
+    for (const auto& item : previous.items) {
+        if (!item.semantic.empty()) continue;
+        const bool text = item.raw.size() >= 8 && ((ReadLe32(item.raw.data() + 4) >> 1U) & 3U) == 0;
+        const auto name = ApeDisplayField(item.key);
+        if (text && std::any_of(modified.begin(), modified.end(),
+            [&name](const auto& changed) { return SameTagName(changed, name); })) continue;
+        if (item.cover && cover_action != BuiltinCoverAction::unchanged)
+            continue;
+        items.insert(items.end(), item.raw.begin(), item.raw.end());
+        retained_cover = retained_cover || item.cover;
+        if (text) retained_names.push_back(name);
+        ++count;
+    }
+    const auto add = [&items, &count, &fields](std::string_view key,
+                                               std::wstring_view name) {
+        const auto value = GetField(fields, name);
+        if (value.empty()) return;
+        AppendApeTextItem(items, key, value);
+        ++count;
+    };
+    add("Title", L"Title");
+    add("Artist", L"Artist");
+    add("Album", L"Album");
+    add("Track", L"Tracknumber");
+    add("Genre", L"Genre");
+    add("Year", L"Date");
+    add("Comment", L"Comment");
+    for (const auto& field : fields.fields) {
+        if (field.value.empty() || IsStandardField(field.name) ||
+            std::any_of(retained_names.begin(), retained_names.end(),
+                [&field](const auto& name) { return WideAsciiEqual(field.name, name); })) continue;
+        const auto encoded = EncodeUtf8(field.name);
+        AppendApeTextItem(items, std::string_view(reinterpret_cast<const char*>(encoded.data()),
+                                                encoded.size()), field.value);
+        ++count;
+    }
+    if (!retained_cover && !fields.cover.empty()) {
+        AppendApeCoverItem(items, fields.cover);
+        ++count;
+    }
+    const std::uint64_t tag_size = items.size() + 32ULL;
+    if (tag_size > std::numeric_limits<std::uint32_t>::max()) return {};
+    const auto size = static_cast<std::uint32_t>(tag_size);
+    auto output = ApeBlock(true, size, count);
+    output.insert(output.end(), items.begin(), items.end());
+    auto footer = ApeBlock(false, size, count);
+    output.insert(output.end(), footer.begin(), footer.end());
+    return output;
+}
+
+void EncodeFixedAnsi(std::span<unsigned char> destination,
+                     std::wstring_view value) {
+    std::fill(destination.begin(), destination.end(),
+              static_cast<unsigned char>(0));
+    // A too-small output buffer makes WideCharToMultiByte fail; it does not
+    // truncate.  Copy complete encoded characters into the fixed-width field.
+    size_t written{};
+    for (size_t index = 0; index < value.size();) {
+        const size_t units = value[index] >= 0xd800 && value[index] <= 0xdbff &&
+            index + 1 < value.size() && value[index + 1] >= 0xdc00 &&
+            value[index + 1] <= 0xdfff ? 2 : 1;
+        std::array<char, 8> encoded{};
+        const int count = WideCharToMultiByte(CP_ACP, 0, value.data() + index,
+            static_cast<int>(units), encoded.data(), static_cast<int>(encoded.size()),
+            nullptr, nullptr);
+        if (count <= 0 || static_cast<size_t>(count) > destination.size() - written) break;
+        std::memcpy(destination.data() + written, encoded.data(), count);
+        written += count;
+        index += units;
+    }
+}
+
+Bytes BuildId3v1(const TagData& fields) {
+    Bytes output(128, 0);
+    std::memcpy(output.data(), "TAG", 3);
+    EncodeFixedAnsi(std::span<unsigned char>(output).subspan(3, 30),
+                    GetField(fields, L"Title"));
+    EncodeFixedAnsi(std::span<unsigned char>(output).subspan(33, 30),
+                    GetField(fields, L"Artist"));
+    EncodeFixedAnsi(std::span<unsigned char>(output).subspan(63, 30),
+                    GetField(fields, L"Album"));
+    EncodeFixedAnsi(std::span<unsigned char>(output).subspan(93, 4),
+                    GetField(fields, L"Date"));
+    const auto track_text = GetField(fields, L"Tracknumber");
+    wchar_t* end{};
+    const long track = std::wcstol(track_text.c_str(), &end, 10);
+    if (end != track_text.c_str() && track > 0 && track <= 255) {
+        EncodeFixedAnsi(std::span<unsigned char>(output).subspan(97, 28),
+                        GetField(fields, L"Comment"));
+        output[125] = 0;
+        output[126] = static_cast<unsigned char>(track);
+    } else {
+        EncodeFixedAnsi(std::span<unsigned char>(output).subspan(97, 30),
+                        GetField(fields, L"Comment"));
+    }
+    const auto genre = GetField(fields, L"Genre");
+    end = nullptr;
+    const long genre_number = std::wcstol(genre.c_str(), &end, 10);
+    output[127] = end != genre.c_str() && *end == 0 && genre_number >= 0 &&
+            genre_number <= 255
+        ? static_cast<unsigned char>(genre_number) : 0xffU;
+    for (size_t index = 0; index < kTagGenres.size(); ++index) {
+        const auto name = kTagGenres[index];
+        if (WideAsciiEqual(genre, std::wstring(name.begin(), name.end()))) {
+            output[127] = static_cast<unsigned char>(index);
+            break;
+        }
+    }
+    return output;
+}
+
+std::optional<Bytes> BuildLyrics3(std::wstring_view lyrics) {
+    if (lyrics.empty()) return Bytes{};
+    if (lyrics.size() > INT_MAX) return std::nullopt;
+    // 004DC39E moves Lyrics to a Lyrics3 LYR field when ID3v1 is selected.
+    // Keep representable ACP bytes, but use the original reader's UTF-8
+    // detection when ACP would replace characters with question marks.
+    BOOL substituted{};
+    const int size = WideCharToMultiByte(CP_ACP, 0, lyrics.data(),
+        static_cast<int>(lyrics.size()), nullptr, 0, nullptr, nullptr);
+    if (size <= 0) return std::nullopt;
+    Bytes text(static_cast<size_t>(size));
+    const UINT page = GetACP();
+    if (!WideCharToMultiByte(page, 0, lyrics.data(), static_cast<int>(lyrics.size()),
+            reinterpret_cast<char*>(text.data()), size, nullptr,
+            page == CP_UTF8 ? nullptr : &substituted)) return std::nullopt;
+    if (substituted) text = EncodeUtf8(lyrics);
+    if (text.empty() || text.size() > 99999) return std::nullopt;
+    const auto decimal = [](Bytes& output, size_t value, size_t width) {
+        const auto begin = output.size();
+        output.resize(begin + width, '0');
+        while (width) { output[begin + --width] = static_cast<unsigned char>('0' + value % 10); value /= 10; }
+    };
+    constexpr std::string_view prefix = "LYRICSBEGININD00003110LYR";
+    Bytes output(prefix.begin(), prefix.end());
+    decimal(output, text.size(), 5);
+    output.insert(output.end(), text.begin(), text.end());
+    decimal(output, output.size(), 6);
+    constexpr std::string_view suffix = "LYRICS200";
+    output.insert(output.end(), suffix.begin(), suffix.end());
+    return output;
+}
+
+bool WriteAll(HANDLE file, std::span<const unsigned char> value) noexcept {
+    size_t done{};
+    while (done < value.size()) {
+        const DWORD request = static_cast<DWORD>(std::min<size_t>(
+            value.size() - done, static_cast<size_t>(MAXDWORD)));
+        DWORD written{};
+        if (!WriteFile(file, value.data() + done, request, &written, nullptr) ||
+            written == 0)
+            return false;
+        done += written;
+    }
+    return true;
+}
+
+bool CopyRange(HANDLE source, HANDLE destination, std::uint64_t offset,
+               std::uint64_t length) {
+    LARGE_INTEGER position{};
+    position.QuadPart = static_cast<LONGLONG>(offset);
+    if (!SetFilePointerEx(source, position, nullptr, FILE_BEGIN)) return false;
+    Bytes buffer(1024U * 1024U);
+    while (length != 0) {
+        const DWORD wanted = static_cast<DWORD>(std::min<std::uint64_t>(
+            length, buffer.size()));
+        DWORD read{};
+        if (!ReadFile(source, buffer.data(), wanted, &read, nullptr) ||
+            read == 0)
+            return false;
+        if (!WriteAll(destination,
+                std::span<const unsigned char>(buffer.data(), read)))
+            return false;
+        length -= read;
+    }
+    return true;
+}
+
+std::filesystem::path CreateSiblingTemporary(
+    const std::filesystem::path& path, UniqueHandle& file) {
+    static std::atomic_uint sequence{};
+    for (unsigned attempt = 0; attempt < 64; ++attempt) {
+        auto temporary = path;
+        temporary += L".ttplayer-tag-" + std::to_wstring(GetCurrentProcessId()) +
+            L"-" + std::to_wstring(sequence.fetch_add(
+                1, std::memory_order_relaxed)) + L".tmp";
+        file.Reset(CreateFileW(temporary.c_str(), GENERIC_WRITE, 0, nullptr,
+            CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr));
+        if (file) return temporary;
+        if (GetLastError() != ERROR_FILE_EXISTS) return {};
+    }
+    return {};
+}
+
+HRESULT ReplaceWithTags(const std::filesystem::path& path, HANDLE source,
+                        const FileLayout& layout, const Bytes& id3v2,
+                        const Bytes& ape, const Bytes& lyrics3, const Bytes& id3v1) {
+    UniqueHandle output;
+    const auto temporary = CreateSiblingTemporary(path, output);
+    if (temporary.empty()) return HRESULT_FROM_WIN32(GetLastError());
+    bool okay = WriteAll(output.Get(), id3v2) &&
+        CopyRange(source, output.Get(), layout.body_begin,
+                  layout.body_end - layout.body_begin) &&
+        WriteAll(output.Get(), ape) && WriteAll(output.Get(), lyrics3) &&
+        WriteAll(output.Get(), id3v1) &&
+        FlushFileBuffers(output.Get());
+    const DWORD write_error = okay ? ERROR_SUCCESS : GetLastError();
+    output.Reset();
+    if (!okay) {
+        DeleteFileW(temporary.c_str());
+        return HRESULT_FROM_WIN32(write_error ? write_error : ERROR_WRITE_FAULT);
+    }
+    const DWORD attributes = GetFileAttributesW(path.c_str());
+    if (attributes != INVALID_FILE_ATTRIBUTES)
+        SetFileAttributesW(temporary.c_str(),
+            attributes & ~FILE_ATTRIBUTE_READONLY);
+    DWORD replace_error{};
+    for (unsigned attempt = 0; ; ++attempt) {
+        if (ReplaceFileW(path.c_str(), temporary.c_str(), nullptr,
+                REPLACEFILE_IGNORE_MERGE_ERRORS, nullptr, nullptr) ||
+            MoveFileExW(temporary.c_str(), path.c_str(),
+                MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) break;
+        replace_error = GetLastError();
+        // A recently created/replaced file can be held briefly by another
+        // reader. Keep the completed sibling and retry only transient access
+        // errors, without reopening or rewriting the original audio data.
+        if (attempt == 4 || (replace_error != ERROR_SHARING_VIOLATION &&
+            replace_error != ERROR_LOCK_VIOLATION && replace_error != ERROR_ACCESS_DENIED)) {
+            DeleteFileW(temporary.c_str());
+            return HRESULT_FROM_WIN32(replace_error);
+        }
+        Sleep(20U * (attempt + 1U));
+    }
+    if (attributes != INVALID_FILE_ATTRIBUTES)
+        SetFileAttributesW(path.c_str(), attributes);
+    return S_OK;
+}
+
+HRESULT WriteMp3(const std::filesystem::path& path,
+                 const Mp3TagPolicy& policy,
+                 std::span<const BuiltinTagWriteField> requested,
+                 std::vector<HRESULT>& field_results,
+                 BuiltinCoverAction cover_action,
+                 std::span<const unsigned char> cover) {
+    UniqueHandle source(CreateFileW(path.c_str(), GENERIC_READ,
+        FILE_SHARE_READ | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
+        FILE_ATTRIBUTE_NORMAL, nullptr));
+    if (!source) return HRESULT_FROM_WIN32(GetLastError());
+    FileLayout layout;
+    if (!ReadMp3Layout(source.Get(), layout) || !FindMpegHeader(source.Get(), layout))
+        return HRESULT_FROM_WIN32(ERROR_INVALID_DATA);
+    TagData fields = MergeMp3Tags(layout, policy.read_priority);
+    bool has_supported = cover_action != BuiltinCoverAction::unchanged;
+    field_results.reserve(requested.size());
+    std::vector<std::wstring> modified;
+    for (const auto& request : requested) {
+        auto canonical = ApeDisplayField(request.name);
+        if (canonical.empty() || request.name.find('\0') != std::string::npos) {
+            field_results.push_back(E_INVALIDARG);
+            continue;
+        }
+        SetField(fields, canonical, request.value);
+        modified.push_back(std::move(canonical));
+        field_results.push_back(S_OK);
+        has_supported = true;
+    }
+    if (cover_action == BuiltinCoverAction::replace) {
+        if (cover.empty()) return E_INVALIDARG;
+        fields.cover.assign(cover.begin(), cover.end());
+    } else if (cover_action == BuiltinCoverAction::remove) {
+        fields.cover.clear();
+    }
+    if (!has_supported) return requested.empty() ? S_OK : E_NOTIMPL;
+
+    std::uint32_t write_type = policy.write_type & 0x0dU;
+    if (write_type == 0) return E_INVALIDARG;
+    const bool has_gain = std::any_of(fields.fields.begin(),
+        fields.fields.end(), [](const auto& field) {
+            return !field.value.empty() && field.name.size() >= 11 &&
+                WideAsciiEqual(std::wstring_view(field.name).substr(0, 11), L"replaygain_");
+        });
+    const auto lyrics = GetField(fields, L"Lyrics");
+    // 004D9B56 tests replaygain_ and lyrics/lyric, not arbitrary metadata.
+    if ((has_gain || !lyrics.empty()) && (write_type & 8U) == 0) write_type |= 4U;
+    // Preserve the existing cover-capable fallback independently of text.
+    if (!fields.cover.empty() && (write_type & (8U | 4U)) == 0)
+        write_type |= 4U;
+    if ((write_type & 8U) != 0 && layout.id3v2.present &&
+        (!layout.id3v2.rewrite_safe || layout.id3v2.major == 2))
+        return HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED);
+
+    Bytes id3v2;
+    Bytes ape;
+    Bytes lyrics3;
+    Bytes id3v1;
+    try {
+        if ((write_type & 1U) && !lyrics.empty()) {
+            auto encoded = BuildLyrics3(lyrics);
+            if (!encoded) return HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED);
+            lyrics3 = std::move(*encoded);
+            SetField(fields, L"Lyrics", L"");
+        }
+        if (write_type & 8U)
+            id3v2 = BuildId3v2(layout.id3v2, fields, policy, cover_action, modified);
+        if (write_type & 4U)
+            ape = BuildApe(layout.ape, fields, cover_action, modified);
+        if (write_type & 1U) id3v1 = BuildId3v1(fields);
+    } catch (...) {
+        return E_OUTOFMEMORY;
+    }
+    if ((write_type & 8U) && id3v2.empty()) return E_OUTOFMEMORY;
+    if ((write_type & 4U) && ape.empty()) return E_OUTOFMEMORY;
+    return ReplaceWithTags(path, source.Get(), layout, id3v2, ape, lyrics3, id3v1);
+}
+
+HRESULT WriteMpegReplayGain(const std::filesystem::path& path,
+                            std::wstring_view gain, std::wstring_view peak) {
+    UniqueHandle source(CreateFileW(path.c_str(), GENERIC_READ,
+        FILE_SHARE_READ | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
+        FILE_ATTRIBUTE_NORMAL, nullptr));
+    if (!source) return HRESULT_FROM_WIN32(GetLastError());
+    FileLayout layout;
+    if (!ReadMp3Layout(source.Get(), layout) || !FindMpegHeader(source.Get(), layout))
+        return HRESULT_FROM_WIN32(ERROR_INVALID_DATA);
+    if (layout.id3v2.present &&
+        (!layout.id3v2.rewrite_safe || layout.id3v2.major == 2))
+        return HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED);
+
+    const auto is_gain = [](std::wstring_view name) {
+        return WideAsciiEqual(name, L"replaygain_track_gain") ||
+               WideAsciiEqual(name, L"replaygain_track_peak");
+    };
+    Bytes id3;
+    if (layout.id3v2.present) {
+        // A scan must not apply the property dialog's tag conversion policy.
+        // Keep every unrelated frame, including private data, lyrics and APIC.
+        Bytes frames;
+        for (const auto& frame : layout.id3v2.frames) {
+            if (!is_gain(frame.metadata_name))
+                frames.insert(frames.end(), frame.raw.begin(), frame.raw.end());
+        }
+        AppendUserTextFrame(frames, layout.id3v2.major, L"replaygain_track_gain", gain, 0);
+        AppendUserTextFrame(frames, layout.id3v2.major, L"replaygain_track_peak", peak, 0);
+        const auto size = std::max<std::uint64_t>(frames.size(), layout.id3v2.total_size - 10);
+        if (size > kMaximumTagBytes) return E_OUTOFMEMORY;
+        frames.resize(static_cast<size_t>(size), 0);
+        id3 = {'I', 'D', '3', layout.id3v2.major, 0, 0};
+        AppendSynchsafe(id3, static_cast<std::uint32_t>(frames.size()));
+        id3.insert(id3.end(), frames.begin(), frames.end());
+    }
+
+    Bytes ape;
+    if (layout.ape.present || (!layout.id3v2.present && (!gain.empty() || !peak.empty()))) {
+        // Keep each original item raw; don't merge other tag families into it.
+        auto previous = layout.ape;
+        std::erase_if(previous.items, [&](const auto& item) {
+            return is_gain(ApeDisplayField(item.key));
+        });
+        for (auto& item : previous.items) item.semantic.clear();
+        TagData changed;
+        SetField(changed, L"replaygain_track_gain", std::wstring(gain));
+        SetField(changed, L"replaygain_track_peak", std::wstring(peak));
+        ape = BuildApe(previous, changed, BuiltinCoverAction::unchanged);
+        if (ape.empty()) return E_OUTOFMEMORY;
+    }
+    Bytes before, after;
+    const auto start = layout.ape.present ? layout.ape.physical_start : layout.body_end;
+    const auto end = layout.ape.present ? layout.ape.footer_end : layout.body_end;
+    if (!ReadRange(source.Get(), layout.body_end, start - layout.body_end, before) ||
+        !ReadRange(source.Get(), end, layout.file_size - end, after))
+        return STG_E_READFAULT;
+    // The untouched tail includes ID3v1 and Lyrics3, in their original order.
+    before.insert(before.end(), ape.begin(), ape.end());
+    before.insert(before.end(), after.begin(), after.end());
+    return ReplaceWithTags(path, source.Get(), layout, id3, before, {}, {});
+}
+
+bool ExtensionIs(const std::filesystem::path& path,
+                 std::wstring_view extension) {
+    const auto actual = path.extension().wstring();
+    return WideAsciiEqual(actual, extension);
+}
+
+// CreateStdContent's two private COM vtables (0052416C / 00524144).
+// Keep method order and stdcall ABI; no C++ virtual destructor precedes them.
+struct StandardContentInterface : IUnknown {
+    virtual HRESULT STDMETHODCALLTYPE ContentCount(DWORD*) = 0;
+    virtual HRESULT STDMETHODCALLTYPE ContentAt(DWORD, wchar_t**, wchar_t**) = 0;
+    virtual HRESULT STDMETHODCALLTYPE ContentValue(const char*, wchar_t**) = 0;
+    virtual HRESULT STDMETHODCALLTYPE ContentSet(const char*, const wchar_t*) = 0;
+};
+struct StandardPicture {
+    DWORD size{sizeof(StandardPicture)};
+    const wchar_t* mime{};
+    const wchar_t* description{};
+    DWORD data_size{};
+    const unsigned char* data{};
+    DWORD picture_type{3};
+};
+struct StandardThumbnailInterface : IUnknown {
+    virtual HRESULT STDMETHODCALLTYPE PictureCount(DWORD*) = 0;
+    virtual HRESULT STDMETHODCALLTYPE PictureMaximumBytes(DWORD*) = 0;
+    virtual HRESULT STDMETHODCALLTYPE PictureMaximumItems(DWORD*) = 0;
+    virtual HRESULT STDMETHODCALLTYPE PictureAt(DWORD, const StandardPicture**) = 0;
+    virtual HRESULT STDMETHODCALLTYPE PictureSet(DWORD, const StandardPicture*, DWORD) = 0;
+    virtual HRESULT STDMETHODCALLTYPE PictureAdd(const StandardPicture*) = 0;
+    virtual HRESULT STDMETHODCALLTYPE PictureRemove(DWORD) = 0;
+};
+constexpr GUID kContentIid{0x7ad84e00,0x5fef,0x4481,{0xb5,0x32,0xfb,0xbd,0x67,0x7e,0x67,0xc2}};
+constexpr GUID kThumbnailIid{0xb5e770af,0xdfb0,0x43e5,{0x9b,0x0c,0x3e,0xe9,0x8e,0x7b,0x62,0x48}};
+
+class StandardContent final : public StandardContentInterface,
+                              public StandardThumbnailInterface {
+public:
+    StandardContent(IStream* stream, DWORD write_type) : stream_(stream), write_type_(write_type) {
+        stream_->AddRef();
+    }
+    ~StandardContent() { stream_->Release(); }
+    HRESULT Initialize(ULONGLONG* audio_bytes) {
+        LARGE_INTEGER zero{};
+        ULARGE_INTEGER previous{};
+        if (FAILED(stream_->Seek(zero, STREAM_SEEK_CUR, &previous))) return STG_E_SEEKERROR;
+        const bool read = ReadMp3Layout(stream_, layout_);
+        LARGE_INTEGER start{};
+        start.QuadPart = read ? layout_.body_begin : previous.QuadPart;
+        stream_->Seek(start, STREAM_SEEK_SET, nullptr);
+        if (!read) return HRESULT_FROM_WIN32(ERROR_INVALID_DATA);
+        fields_ = MergeMp3Tags(layout_, Mp3TagPolicy{}.read_priority);
+        STATSTG stat{};
+        writable_ = SUCCEEDED(stream_->Stat(&stat, STATFLAG_NONAME)) &&
+                    (stat.grfMode & 3U) == STGM_READWRITE;
+        if (audio_bytes) *audio_bytes = layout_.body_end - layout_.body_begin;
+        return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID iid, void** output) override {
+        if (!output) return E_POINTER;
+        *output = nullptr;
+        if (InlineIsEqualGUID(iid, IID_IUnknown) || InlineIsEqualGUID(iid, kContentIid))
+            *output = static_cast<StandardContentInterface*>(this);
+        else if (InlineIsEqualGUID(iid, kThumbnailIid))
+            *output = static_cast<StandardThumbnailInterface*>(this);
+        else return E_NOINTERFACE;
+        AddRef();
+        return S_OK;
+    }
+    ULONG STDMETHODCALLTYPE AddRef() override { return InterlockedIncrement(&references_); }
+    ULONG STDMETHODCALLTYPE Release() override {
+        const LONG remaining = InterlockedDecrement(&references_);
+        if (!remaining) delete this;
+        return remaining;
+    }
+    HRESULT STDMETHODCALLTYPE ContentCount(DWORD* count) override {
+        if (!count) return E_POINTER;
+        *count = static_cast<DWORD>(fields_.fields.size());
+        return S_OK;
+    }
+    static HRESULT CopyText(std::wstring_view text, wchar_t** output) {
+        if (!output) return E_POINTER;
+        *output = static_cast<wchar_t*>(CoTaskMemAlloc((text.size()+1)*sizeof(wchar_t)));
+        if (!*output) return E_OUTOFMEMORY;
+        std::copy(text.begin(), text.end(), *output);
+        (*output)[text.size()] = 0;
+        return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE ContentAt(DWORD index, wchar_t** name, wchar_t** value) override {
+        if (!name || !value) return E_POINTER;
+        *name = *value = nullptr;
+        if (index >= fields_.fields.size()) return E_INVALIDARG;
+        HRESULT status = CopyText(fields_.fields[index].name, name);
+        if (SUCCEEDED(status)) status = CopyText(fields_.fields[index].value, value);
+        if (FAILED(status)) { CoTaskMemFree(*name); *name = nullptr; }
+        return status;
+    }
+    static std::wstring FieldName(const char* name) {
+        auto canonical = CanonicalField(name);
+        if (!canonical.empty()) return canonical;
+        return DecodeUtf8({reinterpret_cast<const unsigned char*>(name), std::strlen(name)});
+    }
+    HRESULT STDMETHODCALLTYPE ContentValue(const char* name, wchar_t** output) override {
+        if (!output) return E_POINTER;
+        *output = nullptr;
+        if (!name || !*name) return E_INVALIDARG;
+        try {
+            const auto value = GetField(fields_, FieldName(name));
+            return value.empty() ? E_INVALIDARG : CopyText(value, output);
+        } catch (...) { return E_OUTOFMEMORY; }
+    }
+    HRESULT STDMETHODCALLTYPE ContentSet(const char* name, const wchar_t* value) override {
+        try {
+            auto changed = fields_;
+            if (!name) {
+                if (changed.fields.empty()) return S_OK;
+                changed.fields.clear();
+            }
+            else {
+                const auto key = FieldName(name);
+                if (key.empty()) return E_INVALIDARG;
+                if (GetField(changed, key) == (value ? value : L"")) return S_OK;
+                SetField(changed, key, value ? value : L"");
+            }
+            return Save(std::move(changed), BuiltinCoverAction::unchanged);
+        } catch (...) { return E_OUTOFMEMORY; }
+    }
+    HRESULT STDMETHODCALLTYPE PictureCount(DWORD* count) override {
+        if (!count) return E_POINTER;
+        *count = fields_.cover.empty() ? 0 : 1;
+        return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE PictureMaximumBytes(DWORD* count) override {
+        if (!count) return E_POINTER;
+        *count = 60000; // 004D9EF7; reading has no such limit.
+        return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE PictureMaximumItems(DWORD* count) override {
+        if (!count) return E_POINTER;
+        *count = 1; // 004D9F11
+        return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE PictureAt(DWORD index, const StandardPicture** picture) override {
+        if (!picture) return E_POINTER;
+        *picture = nullptr;
+        if (index || fields_.cover.empty()) return E_FAIL;
+        picture_.mime = L"image/*";
+        picture_.description = L"";
+        picture_.data_size = static_cast<DWORD>(fields_.cover.size());
+        picture_.data = fields_.cover.data();
+        *picture = &picture_;
+        return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE PictureSet(DWORD index, const StandardPicture* picture, DWORD mask) override {
+        if (index || fields_.cover.empty() || !picture) return E_FAIL;
+        // APE binary cover entries have no independent MIME/type attributes.
+        return (mask & 8U) ? StorePicture(picture) : S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE PictureAdd(const StandardPicture* picture) override {
+        if (!fields_.cover.empty()) return E_FAIL;
+        return StorePicture(picture);
+    }
+    HRESULT STDMETHODCALLTYPE PictureRemove(DWORD index) override {
+        if (index || fields_.cover.empty()) return E_FAIL;
+        try {
+            auto changed = fields_;
+            changed.cover.clear();
+            return Save(std::move(changed), BuiltinCoverAction::remove);
+        } catch (...) { return E_OUTOFMEMORY; }
+    }
+private:
+    HRESULT StorePicture(const StandardPicture* picture) {
+        if (!picture || !picture->data || !picture->data_size || picture->data_size > 60000)
+            return E_INVALIDARG;
+        try {
+            auto changed = fields_;
+            changed.cover.assign(picture->data, picture->data + picture->data_size);
+            return Save(std::move(changed), BuiltinCoverAction::replace);
+        } catch (...) { return E_OUTOFMEMORY; }
+    }
+    HRESULT Save(TagData changed, BuiltinCoverAction action) {
+        if (!writable_) return STG_E_ACCESSDENIED;
+        // Shipped APE/TAK/MPC readers request APEv2 (4). Do not silently
+        // implement an unrequested ID3 rewriting policy for other callers.
+        if (write_type_ != 4 && write_type_ != 0) return E_NOTIMPL;
+        // Native readers may still use this stream after a tag method.
+        struct RestorePosition {
+            IStream* stream;
+            ULARGE_INTEGER value{};
+            bool valid{};
+            explicit RestorePosition(IStream* source) : stream(source) {
+                LARGE_INTEGER zero{};
+                valid = SUCCEEDED(stream->Seek(zero, STREAM_SEEK_CUR, &value));
+            }
+            ~RestorePosition() {
+                if (valid) {
+                    LARGE_INTEGER position{};
+                    position.QuadPart = value.QuadPart;
+                    stream->Seek(position, STREAM_SEEK_SET, nullptr);
+                }
+            }
+        } position(stream_);
+        ApeTag preserved = layout_.ape;
+        // Preserve unrelated binary entries. Rebuild text from the merged
+        // field set, including custom fields and ReplayGain, without duplicates.
+        std::erase_if(preserved.items, [](const ApeItem& item) {
+            return item.raw.size() >= 8 && ((ReadLe32(item.raw.data()+4) >> 1U) & 3U) == 0;
+        });
+        for (const auto& field : changed.fields) {
+            const auto encoded_name = EncodeUtf8(field.name);
+            const std::string key(encoded_name.begin(), encoded_name.end());
+            if (!CanonicalField(key).empty()) continue;
+            ApeItem item;
+            item.key = key;
+            AppendApeTextItem(item.raw, item.key, field.value);
+            preserved.items.push_back(std::move(item));
+        }
+        auto replacement = BuildApe(preserved, changed, action);
+        if (replacement.empty() || replacement.size() > kMaximumTagBytes) return E_OUTOFMEMORY;
+        if (replacement.size() == 64 && ReadLe32(replacement.data()+16) == 0)
+            replacement.clear();
+        // Only the trailing tags change. Audio frames and leading ID3 data
+        // stay byte-for-byte intact; retain the existing ID3v1 bytes as well.
+        if (layout_.has_id3v1) {
+            std::array<unsigned char,128> v1{};
+            if (!ReadAt(stream_, layout_.file_size-128, v1)) return STG_E_READFAULT;
+            replacement.insert(replacement.end(), v1.begin(), v1.end());
+        }
+        Bytes previous;
+        if (!ReadRange(stream_, layout_.body_end, layout_.file_size-layout_.body_end, previous))
+            return STG_E_READFAULT;
+        const auto write_tail = [&](std::span<const unsigned char> bytes) {
+            LARGE_INTEGER position{};
+            position.QuadPart = layout_.body_end;
+            HRESULT hr = stream_->Seek(position, STREAM_SEEK_SET, nullptr);
+            ULONG written{};
+            if (SUCCEEDED(hr)) hr = stream_->Write(bytes.data(), static_cast<ULONG>(bytes.size()), &written);
+            if (SUCCEEDED(hr) && written != bytes.size()) hr = STG_E_WRITEFAULT;
+            ULARGE_INTEGER size{};
+            size.QuadPart = layout_.body_end + bytes.size();
+            if (SUCCEEDED(hr)) hr = stream_->SetSize(size);
+            if (SUCCEEDED(hr)) hr = stream_->Commit(STGC_DEFAULT);
+            return hr;
+        };
+        const HRESULT written = write_tail(replacement);
+        if (FAILED(written)) { static_cast<void>(write_tail(previous)); return written; }
+        fields_ = std::move(changed);
+        layout_.file_size = layout_.body_end + replacement.size();
+        if (const auto ape = ReadApeAt(stream_, layout_.file_size - (layout_.has_id3v1 ? 128 : 0)))
+            layout_.ape = *ape;
+        else layout_.ape = {};
+        return S_OK;
+    }
+    LONG references_{1};
+    IStream* stream_{};
+    DWORD write_type_{};
+    bool writable_{};
+    FileLayout layout_;
+    TagData fields_;
+    StandardPicture picture_;
+};
+
+} // namespace
+
+HRESULT CreateStandardContent(IStream* stream, DWORD write_type,
+                              IUnknown** content, ULONGLONG* audio_bytes) noexcept {
+    if (!content) return E_POINTER;
+    *content = nullptr;
+    if (audio_bytes) *audio_bytes = 0;
+    if (!stream) return E_POINTER;
+    StandardContent* object{};
+    try {
+        object = new StandardContent(stream, write_type);
+        const HRESULT status = object->Initialize(audio_bytes);
+        if (FAILED(status)) { object->Release(); return status; }
+        *content = static_cast<StandardContentInterface*>(object);
+        return S_OK;
+    } catch (...) {
+        if (object) object->Release();
+        return E_OUTOFMEMORY;
+    }
+}
+
+HRESULT ReadBuiltinMpegFileInfo(const std::filesystem::path& path,
+                               const Mp3TagPolicy& policy,
+                               BuiltinFileInfo& result) noexcept {
+    try {
+        BuiltinFileInfo decoded;
+        const HRESULT status = ReadMp3(path, policy, decoded);
+        if (SUCCEEDED(status)) result = std::move(decoded);
+        return status;
+    } catch (const std::bad_alloc&) { return E_OUTOFMEMORY; }
+    catch (...) { return HRESULT_FROM_WIN32(ERROR_INVALID_DATA); }
+}
+
+HRESULT ReadBuiltinFileInfo(const std::filesystem::path& path,
+                            const Mp3TagPolicy& policy,
+                            BuiltinFileInfo& result, bool allow_system_fallback) noexcept {
+    try {
+        BuiltinFileInfo decoded;
+        if (IsMidiPath(path)) {
+            // 004E9BF5 opens a temporary graph solely for duration. It never
+            // runs the graph or advertises PCM reads / writable tags.
+            MidiPlayer player;
+            const HRESULT status = player.Open(path);
+            if (FAILED(status)) return status;
+            decoded.capabilities = 0x0a;
+            decoded.format = MidiReaderFormat();
+            decoded.duration_ms = static_cast<DWORD>(std::clamp<int64_t>(
+                player.Duration().count(), 0, MAXDWORD));
+            decoded.codec = L"MID|MIDI Music";
+            result = std::move(decoded);
+            return S_OK;
+        }
+        std::wstring hint;
+        HRESULT status = ProbeAudioFormatHint(path, hint);
+        if (FAILED(status)) return status;
+        status = E_NOINTERFACE;
+        if (hint == L".mp3" || hint == L".mp2" || hint == L".mp1" ||
+            hint == L".mpa" || hint == L".mp3pro")
+            status = ReadMp3(path, policy, decoded);
+        else if (hint == L".wav" || hint == L".wave")
+            status = ReadWave(path, decoded);
+        if (FAILED(status) && allow_system_fallback && !IsTerminalAudioOpenError(status)) {
+            // Build the same audio graph as playback, but never run it. Shell
+            // properties alone are not evidence that a file is decodable.
+            struct MediaLifetime {
+                HRESULT status{E_FAIL};
+                ~MediaLifetime() { if (SUCCEEDED(status)) platform::MFShutdown(); }
+            } media;
+            auto source = CreateDirectShowSource();
+            if (!source->Open(path, {})) {
+                const HRESULT opened = source->ErrorResult();
+                if (IsTerminalAudioOpenError(opened)) return opened;
+                source.reset();
+                // Retain the modern extension (MF/WM) used by playback, too.
+                // The helper owns COM; no graph is run for metadata queries.
+                media.status = platform::MFStartup(MF_VERSION, MFSTARTUP_LITE);
+                source = CreateDecodedAudioSource(path, 0, nullptr, nullptr);
+                if (!source->Open(path, {})) return source->ErrorResult();
+            }
+            const auto format = source->DisplayFormat();
+            decoded = {};
+            decoded.format = source->OutputFormat();
+            decoded.format.cbSize = 0;
+            decoded.format.wFormatTag = format.format_tag;
+            decoded.format.nAvgBytesPerSec = format.bytes_per_second;
+            decoded.codec = format.codec_name;
+            decoded.duration_ms = static_cast<DWORD>(std::clamp<int64_t>(source->Duration().count(), 0, MAXDWORD));
+            decoded.encoded_bits_per_second = format.bytes_per_second * 8U;
+            BuiltinFileInfo tags;
+            if ((format.format_tag == WAVE_FORMAT_MPEG || format.format_tag == WAVE_FORMAT_MPEGLAYER3) &&
+                SUCCEEDED(ReadMp3(path, policy, tags))) {
+                decoded = std::move(tags);
+            } else if (SUCCEEDED(ReadShellFallback(path, tags))) {
+                decoded.metadata = std::move(tags.metadata);
+                decoded.cover = std::move(tags.cover);
+            }
+            status = S_OK;
+        }
+        if (SUCCEEDED(status)) result = std::move(decoded);
+        return status;
+    } catch (const std::bad_alloc&) {
+        return E_OUTOFMEMORY;
+    } catch (...) {
+        return HRESULT_FROM_WIN32(ERROR_INVALID_DATA);
+    }
+}
+
+HRESULT WriteBuiltinMpegReplayGain(const std::filesystem::path& path,
+                                  std::wstring_view gain,
+                                  std::wstring_view peak) noexcept {
+    try { return WriteMpegReplayGain(path, gain, peak); }
+    catch (const std::bad_alloc&) { return E_OUTOFMEMORY; }
+    catch (...) { return HRESULT_FROM_WIN32(ERROR_INVALID_DATA); }
+}
+
+BuiltinTagWriteResult WriteBuiltinFileInfo(
+    const std::filesystem::path& path, const Mp3TagPolicy& policy,
+    std::span<const BuiltinTagWriteField> fields,
+    BuiltinCoverAction cover_action,
+    std::span<const unsigned char> cover) noexcept {
+    BuiltinTagWriteResult result;
+    try {
+        result.status = WriteMp3(path, policy, fields, result.fields,
+                                 cover_action, cover);
+        if (cover_action != BuiltinCoverAction::unchanged)
+            result.cover_status = result.status;
+        if (FAILED(result.status)) {
+            if (result.fields.empty()) result.fields.assign(fields.size(), result.status);
+            for (auto& field : result.fields) {
+                if (SUCCEEDED(field)) field = result.status;
+            }
+        }
+    } catch (const std::bad_alloc&) {
+        result.status = E_OUTOFMEMORY;
+        result.fields.assign(fields.size(), E_OUTOFMEMORY);
+        if (cover_action != BuiltinCoverAction::unchanged)
+            result.cover_status = E_OUTOFMEMORY;
+    } catch (...) {
+        result.status = HRESULT_FROM_WIN32(ERROR_INVALID_DATA);
+        result.fields.assign(fields.size(), result.status);
+        if (cover_action != BuiltinCoverAction::unchanged)
+            result.cover_status = result.status;
+    }
+    return result;
+}
+
+} // namespace ttplayer::audio

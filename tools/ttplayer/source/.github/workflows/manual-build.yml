@@ -1,0 +1,497 @@
+name: Manual Windows Build
+run-name: Windows x86 ${{ inputs.configuration }} - ${{ github.ref_name }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      configuration:
+        description: Universal build configuration
+        type: choice
+        required: true
+        default: Release
+        options:
+          - Release
+      release_a_version:
+        description: Release a Version (GitHub)
+        type: boolean
+        required: false
+        default: false
+      release_to_gitee:
+        description: Publish Release to Gitee
+        type: boolean
+        required: false
+        default: false
+      ttpcomm_version:
+        description: TTPCOMM release to include (latest stable by default, or a date version)
+        type: string
+        required: false
+        default: latest
+
+permissions:
+  contents: read
+
+# Keep version allocation and BOTH publication jobs in one reservation window.
+# Build-only runs use separate groups and remain independent.
+concurrency:
+  group: ${{ (inputs.release_a_version || inputs.release_to_gitee) && 'manual-player-release' || format('manual-player-build-{0}', github.run_id) }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build player (VS 2026, Windows x86)
+    runs-on: windows-2025-vs2026
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      BUILD_CONFIGURATION: ${{ inputs.configuration }}
+    outputs:
+      release_date: ${{ steps.release_date.outputs.value }}
+      release_version: ${{ steps.version.outputs.version }}
+      previous_version: ${{ steps.version.outputs.previous }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - name: Validate release configuration, GitHub token and capture Beijing date
+        id: release_date
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+          PUBLISH_RELEASE: ${{ inputs.release_a_version }}
+          PUBLISH_GITEE: ${{ inputs.release_to_gitee }}
+        run: |
+          if ($env:BUILD_CONFIGURATION -ne 'Release') {
+            throw 'The universal player requires the Release build configuration.'
+          }
+          if ([string]::IsNullOrWhiteSpace($env:GH_TOKEN)) {
+            throw 'Configure the GH_TOKEN Actions secret for authenticated GitHub API requests.'
+          }
+          $releaseDate = [DateTimeOffset]::UtcNow.ToOffset([TimeSpan]::FromHours(8)).ToString(
+            'yyyy.MM.dd', [Globalization.CultureInfo]::InvariantCulture)
+          "value=$releaseDate" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+      - name: Validate Gitee secrets
+        if: inputs.release_to_gitee
+        env:
+          GITEE_REPO: ${{ secrets.GITEE_REPO }}
+          GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:GITEE_REPO) -or
+              [string]::IsNullOrWhiteSpace($env:GITEE_TOKEN)) {
+            throw 'Gitee publication requires the GITEE_REPO and GITEE_TOKEN secrets.'
+          }
+
+      - name: Download and verify latest Gitee release CLI
+        if: inputs.release_to_gitee
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          ./cmake/download_gitee_cli.ps1 -OutputDirectory build/gitee-release-cli
+          $cli = (Resolve-Path -LiteralPath build/gitee-release-cli/gitee-release-rs.exe).Path
+          & $cli --version
+          if ($LASTEXITCODE -ne 0) { throw 'The downloaded Gitee release CLI could not start.' }
+          "GITEE_RELEASE_CLI=$cli" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Allocate final version before compilation
+        id: version
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+          PUBLISH_RELEASE: ${{ inputs.release_a_version }}
+          PUBLISH_GITEE: ${{ inputs.release_to_gitee }}
+          GITEE_REPO: ${{ inputs.release_to_gitee && secrets.GITEE_REPO || '' }}
+          GITEE_TOKEN: ${{ inputs.release_to_gitee && secrets.GITEE_TOKEN || '' }}
+          RELEASE_DATE: ${{ steps.release_date.outputs.value }}
+        run: |
+          ./cmake/resolve_release_version.ps1 -ReleaseDate $env:RELEASE_DATE -Repository $env:GITHUB_REPOSITORY `
+            -PublishGitHub:($env:PUBLISH_RELEASE -eq 'true') -PublishGitee:($env:PUBLISH_GITEE -eq 'true')
+
+      - name: Verify VS 2026 toolchain
+        run: |
+          cmake --version
+          $capabilitiesJson = cmake -E capabilities
+          if ($LASTEXITCODE -ne 0) { throw 'Could not query CMake capabilities.' }
+          $capabilities = $capabilitiesJson | ConvertFrom-Json
+          if ($capabilities.generators.name -notcontains 'Visual Studio 18 2026') {
+            throw 'Visual Studio 2026 requires CMake 4.2 or newer. Check the runner image and CMake PATH.'
+          }
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio/Installer/vswhere.exe'
+          if (-not (Test-Path -LiteralPath $vswhere)) { throw 'vswhere.exe is missing from the runner.' }
+          $installation = & $vswhere -latest -products '*' -version '[18.0,19.0)' `
+            -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 Microsoft.VisualStudio.Component.VC.ATL -property installationPath
+          if ($LASTEXITCODE -ne 0 -or -not $installation) {
+            throw 'Visual Studio 2026 with x86/x64 C++ tools and ATL was not found. Use the windows-2025-vs2026 runner.'
+          }
+          $installation = $installation.Trim()
+          Write-Output "Visual Studio 2026: $installation"
+          "TTPLAYER_VS_INSTANCE=$installation" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      # This repository is the local rebuild/ directory. Private reverse/
+      # inputs, tests, runtime DLLs and personal settings are not in the checkout.
+      - name: Prepare updater access (public fallback on service unavailability)
+        env:
+          GITEE_TOKEN_UPDATER: ${{ secrets.GITEE_TOKEN_UPDATER }}
+        run: python cmake/prepare_update_access.py --output build/update_access.h --allow-unverified-public
+
+      - name: Configure
+        run: >-
+          cmake -S . -B build -G "Visual Studio 18 2026" -A Win32
+          "-DCMAKE_GENERATOR_INSTANCE=$env:TTPLAYER_VS_INSTANCE"
+          -DBUILD_TESTING=OFF -DTTPLAYER_STAGE_RUNTIME=OFF
+          -DTTPLAYER_OPTIMIZE_SIZE=ON
+          "-DTTPLAYER_UPDATE_ACCESS_FILE=$env:GITHUB_WORKSPACE/build/update_access.h"
+          "-DTTPLAYER_BUILD_VERSION=${{ steps.version.outputs.version }}"
+
+      - name: Build and audit universal player
+        run: cmake --build build --config "$env:BUILD_CONFIGURATION" --target ttplayer_rebuild --parallel 4
+
+      - name: Download and verify latest HTTPS component
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+        run: >-
+          python cmake/download_https_component.py --output "build/$env:BUILD_CONFIGURATION"
+          --exports build/_deps/ttplayer_yy_thunks-src/Config/x86/5.1.2600.txt
+          --exports build/_deps/ttplayer_yy_thunks-src/Config/x86/6.1.7600.txt
+
+      - name: Download and verify selected TTPCOMM component
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+          TTPCOMM_VERSION: ${{ inputs.ttpcomm_version || 'latest' }}
+        run: >-
+          python cmake/download_ttpcomm_component.py --output "build/$env:BUILD_CONFIGURATION"
+          --version "$env:TTPCOMM_VERSION"
+          --exports build/_deps/ttplayer_yy_thunks-src/Config/x86/5.1.2600.txt
+          --exports build/_deps/ttplayer_yy_thunks-src/Config/x86/6.1.7600.txt
+
+      - name: Download and verify latest lyrics search component
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+        run: >-
+          python cmake/download_lrcsh_component.py --output "build/$env:BUILD_CONFIGURATION"
+          --exports build/_deps/ttplayer_yy_thunks-src/Config/x86/5.1.2600.txt
+          --exports build/_deps/ttplayer_yy_thunks-src/Config/x86/6.1.7600.txt
+
+      - name: Prepare artifact
+        env:
+          PACKAGE_VERSION: ${{ steps.version.outputs.version }}
+          PUBLISH_GITEE: ${{ inputs.release_to_gitee }}
+        run: |
+          if ($env:PACKAGE_VERSION -notmatch '^[0-9]{4}\.[0-9]{2}\.[0-9]{2}(?:p[1-9][0-9]*)?$') {
+            throw 'Missing final build version for package names.'
+          }
+          . ./cmake/version.ps1
+          $output = Join-Path 'build' $env:BUILD_CONFIGURATION
+          $executable = Join-Path $output 'TTPlayerRebuild.exe'
+          if (-not (Test-Path -LiteralPath $executable -PathType Leaf)) {
+            throw 'The player executable was not produced.'
+          }
+          Assert-PlayerFileVersion $executable $env:PACKAGE_VERSION
+          New-Item -ItemType Directory -Path artifact | Out-Null
+          $packageName = "TTPlayerRebuild-$env:PACKAGE_VERSION.zip"
+          $packageArchive = Join-Path artifact $packageName
+          ./cmake/package_player.ps1 -BuildDirectory build -Destination $packageArchive
+          $hash = (Get-FileHash -LiteralPath $packageArchive -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  $packageName" | Set-Content -LiteralPath artifact/SHA256SUMS.txt -Encoding utf8
+          if ($env:PUBLISH_GITEE -eq 'true') {
+            New-Item -ItemType Directory -Path artifact/cli -Force | Out-Null
+            Copy-Item -LiteralPath $env:GITEE_RELEASE_CLI -Destination artifact/cli/gitee-release-rs.exe
+            Copy-Item -LiteralPath build/gitee-release-cli/gitee-cli.json,cmake/download_gitee_cli.ps1 -Destination artifact/cli
+            ./artifact/cli/download_gitee_cli.ps1 -OutputDirectory artifact/cli -VerifyOnly
+          }
+          [ordered]@{
+            commit = $env:GITHUB_SHA
+            ref = $env:GITHUB_REF
+            configuration = $env:BUILD_CONFIGURATION
+            package_version = $env:PACKAGE_VERSION
+            architecture = 'x86'
+            generator = 'Visual Studio 18 2026'
+            unified = $true
+            minimum_windows = 'XP SP3'
+            supported_windows = 'XP SP3 / Windows 7 / Windows 10 / Windows 11'
+            yy_thunks = '1.2.2'
+            vc_ltl = '5.3.1'
+            wtl = '10.01'
+            release_size_optimization = $true
+            https_component = Get-Content -LiteralPath (Join-Path $output 'https-component.json') -Raw | ConvertFrom-Json
+            ttpcomm_component = Get-Content -LiteralPath (Join-Path $output 'ttpcomm-component.json') -Raw | ConvertFrom-Json
+            lrcsh_component = Get-Content -LiteralPath (Join-Path $output 'lrcsh-component.json') -Raw | ConvertFrom-Json
+            run = "$env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID"
+          } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath artifact/build-info.json -Encoding utf8
+
+      - name: Download, verify and package latest add-ins for release
+        if: inputs.release_a_version || inputs.release_to_gitee
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+          PACKAGE_VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          python cmake/package_addin_bundles.py --version $env:PACKAGE_VERSION --output artifact `
+            --exports build/_deps/ttplayer_yy_thunks-src/Config/x86/5.1.2600.txt `
+            --exports build/_deps/ttplayer_yy_thunks-src/Config/x86/6.1.7600.txt
+          if ($LASTEXITCODE -ne 0) { throw 'Add-in download, verification or packaging failed.' }
+          $packages = @("TTPlayerRebuild-$env:PACKAGE_VERSION.zip",
+            "CodecAddIn-Rebuild-$env:PACKAGE_VERSION.zip", "ExtraAddIn-$env:PACKAGE_VERSION.zip")
+          $sums = foreach ($name in $packages) {
+            $hash = (Get-FileHash -LiteralPath (Join-Path artifact $name) -Algorithm SHA256).Hash.ToLowerInvariant()
+            "$hash  $name"
+          }
+          $sums | Set-Content -LiteralPath artifact/SHA256SUMS.txt -Encoding utf8
+          $info = Get-Content -LiteralPath artifact/build-info.json -Raw -Encoding utf8 | ConvertFrom-Json
+          $bundles = Get-Content -LiteralPath artifact/addin-bundles.json -Raw -Encoding utf8 | ConvertFrom-Json
+          $info | Add-Member -NotePropertyName addin_bundles -NotePropertyValue $bundles
+          $info | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath artifact/build-info.json -Encoding utf8
+
+      - name: Upload player and optional add-in bundles
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: TTPlayer-Windows-x86-${{ inputs.configuration }}-${{ github.run_number }}
+          path: artifact/
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload configure diagnostics on failure
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: TTPlayer-configure-log-${{ github.run_number }}
+          path: |
+            build/CMakeFiles/CMakeConfigureLog.yaml
+          if-no-files-found: ignore
+          retention-days: 7
+
+  prepare_release:
+    name: Prepare Release
+    needs: build
+    if: inputs.release_a_version || inputs.release_to_gitee
+    runs-on: windows-2025
+    timeout-minutes: 20
+    outputs:
+      version: ${{ steps.prepare.outputs.version }}
+      artifact_name: ${{ steps.prepare.outputs.artifact_name }}
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      RELEASE_VERSION: ${{ needs.build.outputs.release_version }}
+      PREVIOUS_VERSION: ${{ needs.build.outputs.previous_version }}
+    steps:
+      - name: Download built player
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: TTPlayer-Windows-x86-${{ inputs.configuration }}-${{ github.run_number }}
+          path: artifact
+
+      - name: Prepare release files
+        id: prepare
+        env:
+          PUBLISH_RELEASE: ${{ inputs.release_a_version }}
+          PUBLISH_GITEE: ${{ inputs.release_to_gitee }}
+          RELEASE_INSTALL_NOTES: |
+            使用该程序前确保本地已安装有 [5.7.9](https://github.com/user-attachments/files/33088775/TTPlayer579.2.zip) 版本的千千静听（没装有？[点这里](https://github.com/user-attachments/files/33088775/TTPlayer579.2.zip)），请按照以下步骤安装重建版：
+            1. 下载并解压 TTPlayerRebuild-{version}.zip。
+            2. 打开开始菜单。
+            3. 打开所有程序——千千静听——右键千千静听程序图标。
+            4. 在菜单选择“打开文件位置”
+            5. 复制 TTPlayerRebuild.exe、TTPUpdater.exe、ttpcomm.dll 和 AddIn 文件夹到与 TTPlayer.exe 同一路径，合并 AddIn 文件夹。
+            6. 启动 TTPlayerRebuild.exe
+            7. 享受重建版千千静听。
+
+            可选插件包（独立下载，退出播放器后解压到同一安装目录）：
+            - CodecAddIn-Rebuild-{version}.zip：WebM、APE、FLAC、MP3/WMA 编码、OGG/Opus、AAC 插件，合并 AddIn 文件夹。
+            - ExtraAddIn-{version}.zip：Winamp 皮肤、MAKI 虚拟机、多语言插件，合并 AddIn 和 i18n 文件夹；i18n 放在播放器旁。
+            - 插件来自各自仓库本次构建解析到的最新正式 Release；插件自身版本独立于播放器，具体版本见下表。
+            - SHA256SUMS.txt 可校验上述三个 ZIP；插件包内另有各运行文件的校验清单。新版更新器更新播放器包中除根目录 SHA256SUMS.txt 外的全部文件，并保留子目录；不删除包外文件。
+            - 从仅更新 EXE 的旧更新器过渡时，首次请手动解压本版播放器包，确保核心 DLL 和 HTTPS 组件同步更新。
+            - 本版要求重建 ttpcomm.dll 的运行接口；请退出播放器后整包替换，不要仅替换 EXE 或混用原版、旧版核心。
+            - 在线歌词搜索由 AddIn/ttp_lrcsh.dll 统一提供，发行包包含 TTPlayerLrcsh 最新稳定版。
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $publishGitHub = $env:PUBLISH_RELEASE -eq 'true'
+          $publishGitee = $env:PUBLISH_GITEE -eq 'true'
+          if (-not ($publishGitHub -or $publishGitee)) { throw 'No publication destination selected.' }
+          if ($publishGitee -and -not (Test-Path -LiteralPath artifact/cli/gitee-release-rs.exe -PathType Leaf)) {
+            throw 'The downloaded Gitee release CLI is missing from the artifact.'
+          }
+          if ($publishGitee) {
+            ./artifact/cli/download_gitee_cli.ps1 -OutputDirectory artifact/cli -VerifyOnly
+          }
+          $info = Get-Content -LiteralPath artifact/build-info.json -Raw | ConvertFrom-Json
+          if ($info.commit -ne $env:GITHUB_SHA -or $info.configuration -ne 'Release' -or
+              $info.unified -ne $true -or $info.package_version -cne $env:RELEASE_VERSION) {
+            throw 'The downloaded artifact does not match this Release build.'
+          }
+          $packages = @("TTPlayerRebuild-$env:RELEASE_VERSION.zip",
+            "CodecAddIn-Rebuild-$env:RELEASE_VERSION.zip", "ExtraAddIn-$env:RELEASE_VERSION.zip")
+          $actualHashes = foreach ($name in $packages) {
+            $hash = (Get-FileHash -LiteralPath (Join-Path artifact $name) -Algorithm SHA256).Hash.ToLowerInvariant()
+            "$hash  $name"
+          }
+          $expectedHashes = (Get-Content -LiteralPath artifact/SHA256SUMS.txt -Raw -Encoding utf8).Trim() -replace "`r", ''
+          if ($expectedHashes -cne ($actualHashes -join "`n")) { throw 'Release package SHA-256 verification failed.' }
+          $bundles = $info.addin_bundles
+          if ($bundles.player_version -cne $env:RELEASE_VERSION -or @($bundles.bundles).Count -ne 2) {
+            throw 'Missing or mismatched add-in release metadata.'
+          }
+          foreach ($bundle in $bundles.bundles) {
+            if ($bundle.archive -cnotin $packages[1..2] -or
+                $bundle.sha256 -cne (Get-FileHash -LiteralPath (Join-Path artifact $bundle.archive) -Algorithm SHA256).Hash.ToLowerInvariant()) {
+              throw 'Add-in source metadata does not match the package.'
+            }
+          }
+
+          # Already compiled with this exact version; do not rename or patch binaries.
+          $version = $env:RELEASE_VERSION
+          $previous = $env:PREVIOUS_VERSION
+          $repoUrl = "$env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY"
+          # Gitee-only publication does not create a GitHub tag. Link to the
+          # actual build commit so its changelog still resolves on GitHub.
+          $logTarget = if ($publishGitHub) { $version } else { $env:GITHUB_SHA }
+          $logUrl = if ($previous) { "$repoUrl/compare/$previous...$logTarget" }
+                    else { "$repoUrl/commits/$logTarget" }
+          $notes = "**完整更新日志**: $logUrl`n`n" + $env:RELEASE_INSTALL_NOTES.Replace('{version}', $version)
+          $notes += "`n`n### 插件版本`n`n| 插件包 | 插件 | 上游正式版本 |`n| --- | --- | --- |`n"
+          foreach ($bundle in $bundles.bundles) {
+            foreach ($component in $bundle.components) {
+              $link = "$($component.repository)/releases/tag/$($component.version)"
+              $notes += "| $($bundle.name) | $($component.dll) | [$($component.version)]($link) |`n"
+            }
+          }
+          Write-Output "Preparing $version; changelog: $logUrl"
+          $notes | Set-Content -LiteralPath artifact/release-notes.md -Encoding utf8
+          [ordered]@{
+            version = $version
+            commit = $env:GITHUB_SHA
+            configuration = 'Release'
+          } | ConvertTo-Json | Set-Content -LiteralPath artifact/release-info.json -Encoding utf8
+          "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "artifact_name=TTPlayer-release-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+      - name: Upload prepared release
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: TTPlayer-release-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifact/
+          if-no-files-found: error
+          retention-days: 14
+
+  github_release:
+    name: GitHub Release
+    needs: prepare_release
+    if: inputs.release_a_version
+    runs-on: windows-2025
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      RELEASE_VERSION: ${{ needs.prepare_release.outputs.version }}
+    steps:
+      - name: Download prepared release
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: ${{ needs.prepare_release.outputs.artifact_name }}
+          path: artifact
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $release = Get-Content -LiteralPath artifact/release-info.json -Raw | ConvertFrom-Json
+          $version = $env:RELEASE_VERSION
+          if ($version -notmatch '^[0-9]{4}\.[0-9]{2}\.[0-9]{2}(?:p[1-9][0-9]*)?$' -or
+              $release.version -cne $version -or $release.commit -cne $env:GITHUB_SHA -or
+              $release.configuration -cne 'Release') {
+            throw 'Prepared release does not match this build and version.'
+          }
+          $packages = @("TTPlayerRebuild-$version.zip", "CodecAddIn-Rebuild-$version.zip", "ExtraAddIn-$version.zip")
+          $actualHashes = foreach ($name in $packages) {
+            $hash = (Get-FileHash -LiteralPath (Join-Path artifact $name) -Algorithm SHA256).Hash.ToLowerInvariant()
+            "$hash  $name"
+          }
+          $expectedHashes = (Get-Content -LiteralPath artifact/SHA256SUMS.txt -Raw -Encoding utf8).Trim() -replace "`r", ''
+          if ($expectedHashes -cne ($actualHashes -join "`n")) {
+            throw 'Prepared release SHA-256 verification failed.'
+          }
+          $attachments = @($packages | ForEach-Object { Join-Path artifact $_ }) + @('artifact/SHA256SUMS.txt')
+          gh release create "$version" @attachments `
+            --repo "$env:GITHUB_REPOSITORY" --target "$env:GITHUB_SHA" `
+            --title "$version" --notes-file artifact/release-notes.md
+          if ($LASTEXITCODE -ne 0) { throw 'GitHub publication failed; existing releases are not overwritten.' }
+
+  gitee_release:
+    name: Gitee Release
+    needs: prepare_release
+    if: inputs.release_to_gitee
+    runs-on: windows-2025
+    timeout-minutes: 35
+    permissions:
+      contents: read
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      RELEASE_VERSION: ${{ needs.prepare_release.outputs.version }}
+    steps:
+      - name: Download prepared release
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: ${{ needs.prepare_release.outputs.artifact_name }}
+          path: artifact
+
+      - name: Publish Gitee Release
+        env:
+          GITEE_REPO: ${{ secrets.GITEE_REPO }}
+          GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
+        # Reuse the verified upstream executable downloaded by the build job.
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $release = Get-Content -LiteralPath artifact/release-info.json -Raw | ConvertFrom-Json
+          $version = $env:RELEASE_VERSION
+          if ($version -notmatch '^[0-9]{4}\.[0-9]{2}\.[0-9]{2}(?:p[1-9][0-9]*)?$' -or
+              $release.version -cne $version -or $release.commit -cne $env:GITHUB_SHA -or
+              $release.configuration -cne 'Release') {
+            throw 'Prepared release does not match this build and version.'
+          }
+          $packages = @("TTPlayerRebuild-$version.zip", "CodecAddIn-Rebuild-$version.zip", "ExtraAddIn-$version.zip")
+          $actualHashes = foreach ($name in $packages) {
+            $hash = (Get-FileHash -LiteralPath (Join-Path artifact $name) -Algorithm SHA256).Hash.ToLowerInvariant()
+            "$hash  $name"
+          }
+          $expectedHashes = (Get-Content -LiteralPath artifact/SHA256SUMS.txt -Raw -Encoding utf8).Trim() -replace "`r", ''
+          if ($expectedHashes -cne ($actualHashes -join "`n")) {
+            throw 'Prepared release SHA-256 verification failed.'
+          }
+          $attachments = @($packages | ForEach-Object { Join-Path artifact $_ }) + @('artifact/SHA256SUMS.txt')
+          if ([string]::IsNullOrWhiteSpace($env:GITEE_REPO) -or
+              [string]::IsNullOrWhiteSpace($env:GITEE_TOKEN)) {
+            throw 'Gitee publication requires the GITEE_REPO and GITEE_TOKEN secrets.'
+          }
+          ./artifact/cli/download_gitee_cli.ps1 -OutputDirectory artifact/cli -VerifyOnly
+          $env:GITEE_RELEASE_CLI = (Resolve-Path -LiteralPath artifact/cli/gitee-release-rs.exe).Path
+          function Invoke-GiteeCli([string[]]$Arguments) {
+            # Credentials stay in the environment, never in command arguments.
+            $json = & $env:GITEE_RELEASE_CLI --json @Arguments
+            if ($LASTEXITCODE -ne 0) { throw "Gitee CLI operation failed: $($Arguments[0]) $($Arguments[1])." }
+            return (($json -join "`n") | ConvertFrom-Json)
+          }
+          # Gitee must already contain this commit (for example via a mirror).
+          # Never silently tag a different branch tip or push source code.
+          $created = Invoke-GiteeCli -Arguments @('release', 'create', $version,
+            '--target', $env:GITHUB_SHA, '--name', $version, '--notes-file', 'artifact/release-notes.md')
+          $releaseId = 0L
+          if (-not [long]::TryParse([string]$created.id, [ref]$releaseId) -or
+              $releaseId -le 0 -or $created.tag_name -cne $version) {
+            throw 'Gitee returned an invalid release ID or tag; no attachments were uploaded.'
+          }
+          Write-Output "Created Gitee release $version (ID $releaseId). Uploading four attachments."
+          foreach ($asset in $attachments) {
+            $null = Invoke-GiteeCli -Arguments @('asset', 'upload', '--id', [string]$releaseId, $asset, '--timeout', '600')
+          }
+          Write-Output "Gitee release $version (ID $releaseId) and all four attachments published."
