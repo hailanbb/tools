@@ -10,7 +10,7 @@
 
 <!-- catalog:start -->
 
-已收藏 **12** 个工具。版本为收录时快照，实际使用请查看官方发行页。
+已收藏 **13** 个工具。版本为收录时快照，实际使用请查看官方发行页。
 
 | 分类 | 工具 | 核心功能 | 使用场景 | 平台 | 收藏版本 | 详细说明 |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
@@ -22,6 +22,7 @@
 | 媒体处理 | TTPlayer · 千千静听社区复刻版 | 经典千千静听的现代开源复刻版，支持动感歌词、Winamp 皮肤、SMTC 系统媒体控件与无损音乐播放 | 本地无损音乐欣赏、怀旧经典播放器体验、千千静听皮肤/插件兼容运行与在线歌词同步 | Windows | 2026.10.09 | [👉 使用指南](tools/ttplayer/README.md) |
 | 媒体处理 | 微信视频号下载器 | 通过本地代理为视频号页面提供下载入口 | 保存本人或获授权的视频素材 | Windows / macOS / Linux | v260907 | [👉 使用指南](tools/wx-channels-download/README.md) |
 | 教育学习 | OpenMAIC · 多智能体互动课堂 | 面向沉浸式学习的多智能体互动课堂平台，一键将任意主题或文档转化为交互式课程与仿真实验 | 课程教学设计、交互式自学体验、多智能体协同授课与实验推演 | Windows / macOS / Linux / Docker | v1.0.3 | [👉 使用指南](tools/openmaic/README.md) |
+| 文件传输 | LinkSwift · 网盘文件直链下载助手 | 基于 JavaScript 的多网盘直链解析与高速下载助手 | 百度网盘/阿里云盘/天翼/迅雷/夸克/123云盘等网页端直链提取与多线程下载工具联动 | Web / Windows / macOS / Linux | v1.1.3 | [👉 使用指南](tools/linkswift/README.md) |
 | 文件传输 | LocalSend · 局域网互传 | 电脑与手机在局域网内互传文件和文字 | 跨系统传照片、文档；无外网时交换资料 | Windows / macOS / Linux / Android / iOS / Fire OS | v1.18.2 | [👉 使用指南](tools/localsend/README.md) |
 | 文件传输 | Piko · 高性能多平台 PikPak 客户端 | 高性能、多平台的第三方 PikPak 网盘客户端，支持磁力解析、多并发传输、信息流快速预览与全端自适应 | PikPak 网盘高速下载与资源管理、磁力链接快速保存预览、多平台（Win/Mac/Linux/Android）离线与在线观影 | Windows / macOS / Linux / Android | v1.2.0 | [👉 使用指南](tools/piko/README.md) |
 | 文档转换 | MarkItDown · 文档转 Markdown | 将 PDF、Office、HTML 等内容转换为 Markdown | 知识库入库、文档检索与大模型文本预处理 | Windows / macOS / Linux | v0.1.7 | [👉 使用指南](tools/markitdown/README.md) |
