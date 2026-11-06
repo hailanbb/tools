@@ -216,6 +216,23 @@
       "imported_at": "2026-10-11T21:26:00+08:00",
       "checked_at": "2026-10-11T21:26:00+08:00",
       "verification": "文档与源码核验；未安装客户端实测、未连接实际网盘账号"
+    },
+    "https://github.com/microsoft/powertoys": {
+      "tool_name": "powertoys",
+      "display_name": "PowerToys · Windows 系统效率工具集",
+      "category": "系统工具",
+      "summary": "微软官方 Windows 定制与日常效率实用工具套件",
+      "scenario": "窗口高级布局分屏、全局快速搜索启动、批量重命名、快捷键修改及屏幕取色等系统操作优化",
+      "platforms": [
+        "Windows"
+      ],
+      "mode": "snapshot",
+      "ref": "v0.102.3101",
+      "commit": "e84973c4f3724eeedd34d836559dac32734c3e22",
+      "license": "MIT",
+      "imported_at": "2026-11-06T21:20:00+08:00",
+      "checked_at": "2026-11-06T21:20:00+08:00",
+      "verification": "文档与源码核验；未安装实测、未执行源码构建"
     }
   }
 }

@@ -10,7 +10,7 @@
 
 <!-- catalog:start -->
 
-已收藏 **11** 个工具。版本为收录时快照，实际使用请查看官方发行页。
+已收藏 **12** 个工具。版本为收录时快照，实际使用请查看官方发行页。
 
 | 分类 | 工具 | 核心功能 | 使用场景 | 平台 | 收藏版本 | 详细说明 |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
@@ -25,6 +25,7 @@
 | 文件传输 | LocalSend · 局域网互传 | 电脑与手机在局域网内互传文件和文字 | 跨系统传照片、文档；无外网时交换资料 | Windows / macOS / Linux / Android / iOS / Fire OS | v1.18.2 | [👉 使用指南](tools/localsend/README.md) |
 | 文件传输 | Piko · 高性能多平台 PikPak 客户端 | 高性能、多平台的第三方 PikPak 网盘客户端，支持磁力解析、多并发传输、信息流快速预览与全端自适应 | PikPak 网盘高速下载与资源管理、磁力链接快速保存预览、多平台（Win/Mac/Linux/Android）离线与在线观影 | Windows / macOS / Linux / Android | v1.2.0 | [👉 使用指南](tools/piko/README.md) |
 | 文档转换 | MarkItDown · 文档转 Markdown | 将 PDF、Office、HTML 等内容转换为 Markdown | 知识库入库、文档检索与大模型文本预处理 | Windows / macOS / Linux | v0.1.7 | [👉 使用指南](tools/markitdown/README.md) |
+| 系统工具 | PowerToys · Windows 系统效率工具集 | 微软官方 Windows 定制与日常效率实用工具套件 | 窗口高级布局分屏、全局快速搜索启动、批量重命名、快捷键修改及屏幕取色等系统操作优化 | Windows | v0.102.3101 | [👉 使用指南](tools/powertoys/README.md) |
 
 <!-- catalog:end -->
 
