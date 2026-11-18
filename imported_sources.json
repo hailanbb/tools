@@ -253,6 +253,25 @@
       "imported_at": "2026-11-06T21:35:00+08:00",
       "checked_at": "2026-11-06T21:35:00+08:00",
       "verification": "文档与源码核验；未安装油猴插件实测、未执行网盘直链解析"
+    },
+    "https://github.com/hut-hzf/ung220z-tool": {
+      "tool_name": "ung220z-tool",
+      "display_name": "ung220z-tool · 中国移动光猫凭据提取工具",
+      "category": "网络工具",
+      "summary": "针对九联 UNG220Z 光猫的 Telnet 开启与配置库凭据一键提取工具",
+      "scenario": "自有光猫设备管理员密码找回、PPPoE 宽带账号密码迁移与配置安全自查",
+      "platforms": [
+        "Windows",
+        "macOS",
+        "Linux"
+      ],
+      "mode": "snapshot",
+      "ref": "main",
+      "commit": "26590ca2abcf9095bcb96dd3ec926a368e1526cd",
+      "license": "MIT",
+      "imported_at": "2026-11-18T11:30:00+08:00",
+      "checked_at": "2026-11-18T11:30:00+08:00",
+      "verification": "文档与源码核验；未连接物理光猫设备实测"
     }
   }
 }
