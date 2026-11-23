@@ -313,6 +313,27 @@
       "imported_at": "2026-11-23T08:50:00+08:00",
       "checked_at": "2026-11-23T08:50:00+08:00",
       "verification": "文档与源码核验；未下载模型权重实测、未执行量化回测"
+    },
+    "https://github.com/galaxy-s10/billd-desk": {
+      "tool_name": "billd-desk",
+      "display_name": "BilldDesk · 跨平台 WebRTC 远程桌面控制系统",
+      "category": "系统工具",
+      "summary": "基于 Vue3、WebRTC 与 Node.js 的开源跨平台远程桌面与低延迟串流系统",
+      "scenario": "多端（Web/桌面/安卓）远程桌面协助、端到端 P2P 低延迟画面传输与键鼠控制",
+      "platforms": [
+        "Web",
+        "Windows",
+        "macOS",
+        "Linux",
+        "Android"
+      ],
+      "mode": "snapshot",
+      "ref": "main",
+      "commit": "9212de860f0d8edba6b8bd0e60c564b037e3ab35",
+      "license": "MIT",
+      "imported_at": "2026-11-23T08:55:00+08:00",
+      "checked_at": "2026-11-23T08:55:00+08:00",
+      "verification": "文档与源码核验；未部署信令服务器与客户端实测远程连接"
     }
   }
 }
