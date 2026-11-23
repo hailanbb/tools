@@ -293,6 +293,26 @@
       "imported_at": "2026-11-23T08:30:00+08:00",
       "checked_at": "2026-11-23T08:30:00+08:00",
       "verification": "文档与源码核验；未加载至 Chrome 实测 Google 账号验证"
+    },
+    "https://github.com/luciferbobo/kit": {
+      "tool_name": "kit",
+      "display_name": "KiT · 基于 DiT 的金融时序预测大模型",
+      "category": "量化金融",
+      "summary": "基于扩散 Transformer 与流匹配的金融 K 线多周期走势预测基础大模型",
+      "scenario": "美股/A股/加密货币多周期 K 线走势预测、收益率与波动率评估及量化回测",
+      "platforms": [
+        "Python",
+        "PyTorch",
+        "Linux",
+        "Windows"
+      ],
+      "mode": "snapshot",
+      "ref": "main",
+      "commit": "a9bf4a30e37076c4fb59a1461a5d5dfbd51a3294",
+      "license": "AGPL-3.0",
+      "imported_at": "2026-11-23T08:50:00+08:00",
+      "checked_at": "2026-11-23T08:50:00+08:00",
+      "verification": "文档与源码核验；未下载模型权重实测、未执行量化回测"
     }
   }
 }

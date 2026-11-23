@@ -10,7 +10,7 @@
 
 <!-- catalog:start -->
 
-已收藏 **15** 个工具。版本为收录时快照，实际使用请查看官方发行页。
+已收藏 **16** 个工具。版本为收录时快照，实际使用请查看官方发行页。
 
 | 分类 | 工具 | 核心功能 | 使用场景 | 平台 | 收藏版本 | 详细说明 |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
@@ -29,6 +29,7 @@
 | 系统工具 | Google QR SMS Helper · 谷歌跨设备扫码转短信验证助手 | 基于 Manifest V3 的 Chrome 扩展，将 Google 强制跨设备扫码验证一键降级为传统 6 位短信验证码 | 桌面端 Google 账号升级与 Cloud Shell 验证时缺乏 Android GMS 设备或国际短信外发能力时的短信验证切换 | Chrome / Edge / Windows / macOS / Linux | v1.1.0 | [👉 使用指南](tools/google-qr-sms-helper/README.md) |
 | 系统工具 | PowerToys · Windows 系统效率工具集 | 微软官方 Windows 定制与日常效率实用工具套件 | 窗口高级布局分屏、全局快速搜索启动、批量重命名、快捷键修改及屏幕取色等系统操作优化 | Windows | v0.102.3101 | [👉 使用指南](tools/powertoys/README.md) |
 | 网络工具 | ung220z-tool · 中国移动光猫凭据提取工具 | 针对九联 UNG220Z 光猫的 Telnet 开启与配置库凭据一键提取工具 | 自有光猫设备管理员密码找回、PPPoE 宽带账号密码迁移与配置安全自查 | Windows / macOS / Linux | main | [👉 使用指南](tools/ung220z-tool/README.md) |
+| 量化金融 | KiT · 基于 DiT 的金融时序预测大模型 | 基于扩散 Transformer 与流匹配的金融 K 线多周期走势预测基础大模型 | 美股/A股/加密货币多周期 K 线走势预测、收益率与波动率评估及量化回测 | Python / PyTorch / Linux / Windows | main | [👉 使用指南](tools/kit/README.md) |
 
 <!-- catalog:end -->
 
