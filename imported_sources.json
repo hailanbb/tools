@@ -272,6 +272,27 @@
       "imported_at": "2026-11-18T11:30:00+08:00",
       "checked_at": "2026-11-18T11:30:00+08:00",
       "verification": "文档与源码核验；未连接物理光猫设备实测"
+    },
+    "https://github.com/havenicec/google-qr-sms-helper": {
+      "tool_name": "google-qr-sms-helper",
+      "display_name": "Google QR SMS Helper · 谷歌跨设备扫码转短信验证助手",
+      "category": "系统工具",
+      "summary": "基于 Manifest V3 的 Chrome 扩展，将 Google 强制跨设备扫码验证一键降级为传统 6 位短信验证码",
+      "scenario": "桌面端 Google 账号升级与 Cloud Shell 验证时缺乏 Android GMS 设备或国际短信外发能力时的短信验证切换",
+      "platforms": [
+        "Chrome",
+        "Edge",
+        "Windows",
+        "macOS",
+        "Linux"
+      ],
+      "mode": "snapshot",
+      "ref": "v1.1.0",
+      "commit": "c91ce2afc73add167d312fb379d551c56c421b9d",
+      "license": "MIT",
+      "imported_at": "2026-11-23T08:30:00+08:00",
+      "checked_at": "2026-11-23T08:30:00+08:00",
+      "verification": "文档与源码核验；未加载至 Chrome 实测 Google 账号验证"
     }
   }
 }
